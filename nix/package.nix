@@ -9,7 +9,7 @@ buildGoModule {
   inherit src;
 
   # Changes whenever go.sum does: set to lib.fakeHash and read the new value from the build error.
-  vendorHash = "sha256-2FTMhWgivUY7En7W6ktuBcyDwbTHbpKZnPZWXBgC4i0=";
+  vendorHash = "sha256-TEDqNbPOOJ1OaeQmyE4SnMM7zKyMTAO+or3iXrnKzWk=";
 
   ldflags = [
     "-s"

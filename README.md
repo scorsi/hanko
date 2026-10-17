@@ -4,7 +4,7 @@ The certificate service of the homelab: it makes certificates available to
 services. Public ones from Let's Encrypt today, internal service identities in
 the SPIFFE model later. Named after the seal stamped on documents.
 
-Status: decided on 2026-10-17, no code yet. Decisions live in
+Status: `hanko check` and `hanko run` (ACME issuer, M1) implemented; not yet in production. Decisions live in
 [`docs/adr/`](docs/adr/), the plan in [`docs/milestones.md`](docs/milestones.md).
 
 ## Where it sits

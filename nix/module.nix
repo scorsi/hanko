@@ -1,6 +1,6 @@
-# NixOS module for hanko (ADR 0002 shape, ADR 0005 identity and permissions). M0 skeleton: the
-# file, the build-time check, the user, the state directory and the certificate directories.
-# The timer, the OnFailure= hook, restartTriggers and the polkit rule come with `hanko run` (M1).
+# NixOS module for hanko (ADR 0001 oneshot and timer, ADR 0002 shape, ADR 0005 identity and
+# permissions): the checked file, the user, the directories, the unit, its timer and the polkit
+# rule that lets it reload the listed units.
 self:
 {
   config,
@@ -14,11 +14,32 @@ let
   toml = pkgs.formats.toml { };
   exe = lib.getExe cfg.package;
   state = "/var/lib/hanko";
+  serviceConfig = {
+    Type = "oneshot";
+    ExecStart = "${exe} run /etc/hanko/hanko.toml";
+    User = "hanko";
+    Group = "hanko";
+    StateDirectory = "hanko";
+    StateDirectoryMode = "0750";
+    CapabilityBoundingSet = "";
+    NoNewPrivileges = true;
+    ProtectSystem = "strict";
+    ProtectHome = true;
+    PrivateTmp = true;
+    PrivateDevices = true;
+    RestrictAddressFamilies = [
+      "AF_INET"
+      "AF_INET6"
+      "AF_UNIX"
+    ];
+  };
+  reloadUnits = lib.unique (lib.concatMap (c: c.reload) (lib.attrValues cfg.certificates));
 
   generated = {
     acme = {
       directory = cfg.acme.directory;
       account_key_file = cfg.acme.accountKeyFile;
+      accept_terms = cfg.acme.acceptTerms;
     };
     dns = {
       nameservers = cfg.dns.nameservers;
@@ -52,6 +73,19 @@ in
       description = "The hanko package.";
     };
 
+    timer = mkOption {
+      type = types.str;
+      default = "hourly";
+      description = "`OnCalendar=` of the renewal timer; certificate lifetimes must span several periods.";
+    };
+
+    onFailure = mkOption {
+      type = types.listOf types.str;
+      default = [ ];
+      example = [ "notify-failure@hanko.service" ];
+      description = "Units started when a run fails (`OnFailure=`).";
+    };
+
     acme = {
       directory = mkOption {
         type = types.str;
@@ -62,6 +96,11 @@ in
         type = types.str;
         default = "${state}/account.key";
         description = "Where hanko creates its ACME account key (the only secret it creates).";
+      };
+      acceptTerms = mkOption {
+        type = types.bool;
+        default = false;
+        description = "Accept the CA's terms of service; required to create the account.";
       };
     };
 
@@ -139,7 +178,6 @@ in
     };
     users.groups.hanko = { };
 
-    # The service itself arrives with `hanko run`; its state directory is created here meanwhile.
     systemd.tmpfiles.rules = [
       "d ${state} 0750 hanko hanko -"
     ]
@@ -147,27 +185,47 @@ in
 
     systemd.services.hanko = {
       description = "hanko certificate run";
-      reloadTriggers = [ configFile ];
-      serviceConfig = {
-        Type = "oneshot";
+      # Run at boot and by every switch that changes the file, before dependents reload (ADR 0001).
+      wantedBy = [ "multi-user.target" ];
+      wants = [ "network-online.target" ];
+      after = [ "network-online.target" ];
+      restartTriggers = [ configFile ];
+      inherit (cfg) onFailure;
+      serviceConfig = serviceConfig // {
         RemainAfterExit = true;
-        ExecStart = "${exe} run /etc/hanko/hanko.toml";
-        User = "hanko";
-        Group = "hanko";
-        StateDirectory = "hanko";
-        StateDirectoryMode = "0750";
-        CapabilityBoundingSet = "";
-        NoNewPrivileges = true;
-        ProtectSystem = "strict";
-        ProtectHome = true;
-        PrivateTmp = true;
-        PrivateDevices = true;
-        RestrictAddressFamilies = [
-          "AF_INET"
-          "AF_INET6"
-          "AF_UNIX"
-        ];
       };
     };
+
+    # A timer cannot rerun hanko.service, which stays active (RemainAfterExit); it starts this
+    # twin instead, same binary and file.
+    systemd.services.hanko-renew = {
+      description = "hanko certificate run (timer)";
+      wants = [ "network-online.target" ];
+      after = [ "network-online.target" ];
+      inherit (cfg) onFailure;
+      inherit serviceConfig;
+    };
+
+    systemd.timers.hanko = {
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        Unit = "hanko-renew.service";
+        OnCalendar = cfg.timer;
+        Persistent = true;
+        RandomizedDelaySec = "5m";
+      };
+    };
+
+    # hanko may reload or restart exactly the units listed in its configuration (ADR 0005).
+    security.polkit.enable = lib.mkIf (reloadUnits != [ ]) true;
+    security.polkit.extraConfig = lib.mkIf (reloadUnits != [ ]) ''
+      polkit.addRule(function (action, subject) {
+        if (action.id == "org.freedesktop.systemd1.manage-units" && subject.user == "hanko" &&
+            ["reload", "restart"].indexOf(action.lookup("verb")) >= 0 &&
+            ${builtins.toJSON reloadUnits}.indexOf(action.lookup("unit")) >= 0) {
+          return polkit.Result.YES;
+        }
+      });
+    '';
   };
 }

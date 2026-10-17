@@ -22,6 +22,9 @@ type Config struct {
 type ACME struct {
 	Directory      string `toml:"directory"`
 	AccountKeyFile string `toml:"account_key_file"`
+	// AcceptTerms is the explicit acceptance of the CA's terms of service, needed only to
+	// create the account (ADR 0003); an existing account works without it.
+	AcceptTerms bool `toml:"accept_terms"`
 }
 
 type DNS struct {
@@ -41,6 +44,12 @@ type Certificate struct {
 }
 
 var nameRE = regexp.MustCompile(`^[a-z0-9-]+$`)
+
+// Timeout is dns.propagation_timeout, already validated by Parse.
+func (d *DNS) Timeout() time.Duration {
+	t, _ := time.ParseDuration(d.PropagationTimeout)
+	return t
+}
 
 // Load reads and validates a file; the error lists every problem, one per line.
 func Load(path string) (*Config, error) {

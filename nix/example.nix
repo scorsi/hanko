@@ -4,7 +4,10 @@
 
   services.hanko = {
     enable = true;
-    acme.directory = "https://acme-staging-v02.api.letsencrypt.org/directory";
+    acme = {
+      directory = "https://acme-staging-v02.api.letsencrypt.org/directory";
+      acceptTerms = true;
+    };
     dns = {
       nameservers = [
         "203.0.113.10:53"

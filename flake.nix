@@ -67,6 +67,9 @@
                   builtins.toJSON {
                     inherit (evaluated.systemd) tmpfiles;
                     unit = evaluated.systemd.services.hanko.serviceConfig;
+                    renew = evaluated.systemd.services.hanko-renew.serviceConfig;
+                    timer = evaluated.systemd.timers.hanko.timerConfig;
+                    polkit = evaluated.security.polkit.extraConfig;
                     config = evaluated.environment.etc."hanko/hanko.toml".source.name;
                   }
                 )
