@@ -1,0 +1,20 @@
+[acme]
+directory = "https://acme-v02.api.letsencrypt.org/directory"
+account_key_file = "/var/lib/hanko/account.key"
+
+[dns]
+nameservers = ["203.0.113.10:53", "[2001:db8::10]:53"]
+tsig_key_file = "/run/secrets/hanko-tsig"
+propagation_timeout = "120s"
+
+[[certificates]]
+name = "home"
+issuer = "acme"
+hosts = ["*.uchi.example.org", "uchi.example.org"]
+reload = ["genkan.service"]
+
+[[certificates]]
+name = "cv"
+issuer = "acme"
+hosts = ["cv.example.org", "cv.soto.example.org"]
+reload = ["genkan.service"]
