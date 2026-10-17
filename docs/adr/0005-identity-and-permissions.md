@@ -1,0 +1,32 @@
+# ADR-0005: Service identity, file permissions and hardening
+
+- Status: accepted
+- Date: 2026-10-17
+
+## Context
+
+hanko writes private keys that other services read, and nothing else on the host may read them. It reads two secrets from sops (TSIG key, later the CA key for `hanko-ca`) and creates one (the ACME account key). It runs on the host that terminates TLS, and later `hanko-ca` runs on one node of the overlay. The same user model as genkan and kekkai applies: static users, no `DynamicUser`, sops ownership set at activation (genkan ADR 0006, kekkai ADR 0018).
+
+## Decision
+
+- **Users**: static system user and group `hanko` for the oneshot, `hanko-ca` for the signer. No `DynamicUser`, no capabilities, no privileged port (`hanko-ca` listens above 1024).
+- **State directory**: `StateDirectory = hanko` (`/var/lib/hanko`), owner `hanko:hanko`, mode `0750`. The ACME account key lives at its root, mode `0600`.
+- **One directory per certificate**, `/var/lib/hanko/<name>/`, **created by the NixOS module** (tmpfiles), owner `hanko`, group the consumer's (`group` option, ADR-0002), mode `2750`. hanko writes files `0640`; the setgid bit gives them the consumer's group without hanko needing `CAP_CHOWN` or membership in every consumer group. A consumer joins the group through `SupplementaryGroups`, as genkan does with `hanko` (genkan ADR 0006): a certificate shared by several services uses a group they all have, a service identity (ADR-0004) uses that service's own group and no other.
+- **Atomic writes**: new files are written next to the old ones and renamed into place; `key.pem` is renamed last, after the certificate, so a reader never sees a certificate whose key is missing. Reloads are sent after every file of the certificate is in place.
+- **Secrets**: the TSIG key and the CA key are sops files with `owner = "hanko"` (or `hanko-ca`), mode `0400`, read in place. No `LoadCredential`: the file is re-read at every run anyway.
+- **Hardening**, both components: `ProtectSystem = "strict"`, `ProtectHome = true`, `PrivateTmp`, `PrivateDevices`, `NoNewPrivileges`, `RestrictAddressFamilies = AF_INET AF_INET6 AF_UNIX`, `CapabilityBoundingSet=` empty. The oneshot additionally needs no listening socket at all; `hanko-ca` binds its overlay address only.
+- **Reload authority**: `systemctl reload <unit>` requires a privilege hanko does not have. The module grants it narrowly through a polkit rule allowing user `hanko` to reload or restart exactly the units listed in its configuration, nothing else.
+- **Logs**: structured, to stderr, journald. Never a key, never a TSIG secret, never an ACME token in logs.
+
+## Alternatives considered
+
+- **hanko as a member of every consumer group, chgrp after write.** Works, but the user accumulates groups and a bug in hanko could write a key readable by the wrong group. Setgid directories created by the module make the permission a declarative fact. Rejected.
+- **Running the oneshot as root for `systemctl reload`.** The one privilege it needs, bought with all of them. A polkit rule scoped to listed units is the small version. Rejected.
+- **`LoadCredential` for the TSIG key.** Fine for a oneshot, but not for `hanko-ca`, and one convention is simpler. Rejected.
+- **Consumers reading from `/etc`.** Certificates change outside of `switch`; `/etc` is Nix's. Rejected.
+
+## Consequences
+
+- A wrong `group` on a certificate fails at the consumer, with a permission error, which is the intended signal.
+- `hanko-ca` holds a signing key on a host; the deployment chooses that host and documents the risk privately, as kekkai ADR 0025 does for identity keys.
+- Adding a writable path or a capability is a new ADR, not a chmod.
