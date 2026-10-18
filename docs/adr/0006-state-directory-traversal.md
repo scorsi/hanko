@@ -1,6 +1,6 @@
 # ADR-0006: The state directory is traversable by consumers
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-10-18
 
 ## Context

@@ -148,3 +148,69 @@ func TestConcurrentRunWaitsThenRenewsNothing(t *testing.T) {
 		t.Fatalf("second run: err %v, issues %d, want 1", err, iss.calls)
 	}
 }
+
+// TestMain doubles as a fake systemctl: Systemctl's tests put a "systemctl" symlink to this
+// binary first in PATH. It logs its arguments; FAKE_ACTIVE=1 makes is-active succeed,
+// FAKE_RELOAD=1 makes reload succeed; restart always succeeds.
+func TestMain(m *testing.M) {
+	if filepath.Base(os.Args[0]) != "systemctl" {
+		os.Exit(m.Run())
+	}
+	f, _ := os.OpenFile(os.Getenv("FAKE_LOG"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	f.WriteString(strings.Join(os.Args[1:], " ") + "\n")
+	f.Close()
+	if slices.Contains(os.Args, "is-active") && os.Getenv("FAKE_ACTIVE") != "1" ||
+		slices.Contains(os.Args, "reload") && os.Getenv("FAKE_RELOAD") != "1" {
+		os.Exit(3)
+	}
+	os.Exit(0)
+}
+
+func TestSystemctl(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	if err := os.Symlink(exe, filepath.Join(bin, "systemctl")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	for _, tc := range []struct {
+		active, reload string
+		err            error
+		calls          string
+	}{
+		{"0", "1", ErrInactive, "is-active --quiet c.service\n"},
+		{"1", "1", nil, "is-active --quiet c.service\n--no-ask-password reload c.service\n"},
+		{"1", "0", nil, "is-active --quiet c.service\n--no-ask-password reload c.service\n--no-ask-password restart c.service\n"},
+	} {
+		log := filepath.Join(t.TempDir(), "calls")
+		t.Setenv("FAKE_LOG", log)
+		t.Setenv("FAKE_ACTIVE", tc.active)
+		t.Setenv("FAKE_RELOAD", tc.reload)
+		err := Systemctl(context.Background(), "c.service")
+		calls, _ := os.ReadFile(log)
+		if !errors.Is(err, tc.err) || string(calls) != tc.calls {
+			t.Errorf("active %s reload %s: err %v, calls %q", tc.active, tc.reload, err, calls)
+		}
+	}
+}
+
+func TestRunSkipsInactiveUnits(t *testing.T) {
+	r, _, _ := setup(t)
+	var out bytes.Buffer
+	r.Log = slog.New(slog.NewTextHandler(&out, nil))
+	r.Reload = func(_ context.Context, unit string) error {
+		if unit == "other.service" {
+			return ErrInactive
+		}
+		return nil
+	}
+	if err := r.Run(context.Background(), []config.Certificate{home}); err != nil {
+		t.Fatal(err)
+	}
+	if s := out.String(); !strings.Contains(s, `msg="reload skipped, unit not active" certificate=home unit=other.service`) || strings.Contains(s, "reload failed") {
+		t.Fatalf("log:\n%s", s)
+	}
+}

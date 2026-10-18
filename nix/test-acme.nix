@@ -3,7 +3,9 @@
 # for two names, for a dummy consumer with its own user and group. Proves the fan-out (both
 # nameservers serve the TXT to hanko's propagation check), the files' group and modes, the reload,
 # that a second run and the timer's twin renew nothing, that a concurrent run waits for the lock,
-# and that a run renews once a third of Pebble's short certificate validity is left.
+# and that a run renews once a third of Pebble's short certificate validity is left. A second
+# consumer ordered After=hanko.service proves the boot run skips a unit that is not active yet
+# instead of stalling on its queued start job (ADR 0005), and is reloaded by the later renewal.
 {
   self,
   annai,
@@ -119,7 +121,10 @@ pkgs.testers.runNixOSTest {
               "*.uchi.example.org"
               "uchi.example.org"
             ];
-            reload = [ "consumer.service" ];
+            reload = [
+              "consumer.service"
+              "late.service"
+            ];
             group = "consumer";
           };
           certificates.cv = {
@@ -156,6 +161,19 @@ pkgs.testers.runNixOSTest {
             ExecReload = "${pkgs.runtimeShell} -c 'echo reloaded >> /run/consumer/reloads'";
           };
         };
+        # A consumer ordered as a real one is: its start job waits for hanko's boot run, which
+        # must skip it rather than queue a reload behind that job.
+        systemd.services.late = {
+          wantedBy = [ "multi-user.target" ];
+          after = [ "hanko.service" ];
+          serviceConfig = {
+            User = "consumer";
+            Group = "consumer";
+            RuntimeDirectory = "late";
+            ExecStart = "${pkgs.runtimeShell} -c 'touch /run/late/reloads; exec ${pkgs.coreutils}/bin/sleep infinity'";
+            ExecReload = "${pkgs.runtimeShell} -c 'echo reloaded >> /run/late/reloads'";
+          };
+        };
       };
   };
 
@@ -182,8 +200,8 @@ pkgs.testers.runNixOSTest {
       def fingerprints() -> dict[str, str]:
           return {c: hanko.succeed(f"openssl x509 -noout -fingerprint -sha256 -in /var/lib/hanko/{c}/fullchain.pem") for c in certs}
 
-      def reloads() -> int:
-          return int(hanko.succeed("wc -l < /run/consumer/reloads").strip())
+      def reloads(unit: str = "consumer") -> int:
+          return int(hanko.succeed(f"wc -l < /run/{unit}/reloads").strip())
 
       def run_renew() -> str:
           """Starts the timer's twin, waits for it, returns its journal."""
@@ -212,6 +230,19 @@ pkgs.testers.runNixOSTest {
           assert state == "active", journals()
           for c in certs:
               hanko.succeed(f"test -s /var/lib/hanko/{c}/fullchain.pem -a -s /var/lib/hanko/{c}/key.pem")
+
+      with subtest("the boot run skips the consumer ordered after it, without waiting for it"):
+          hanko.wait_for_unit("late.service")
+          start, end = (int(hanko.succeed(f"systemctl show -P {p} hanko.service")) for p in ["ExecMainStartTimestampMonotonic", "ExecMainExitTimestampMonotonic"])
+          print(f"hanko.service boot run: {(end - start) / 1e6:.1f} s")
+          # The order timeout a stalled reload would hit is 600 s; issuing both certificates takes far less.
+          assert 0 < end - start < 300_000_000, journals()
+          out = hanko.succeed("journalctl --no-pager -b -u hanko.service")
+          print(out)
+          assert 'msg="reload skipped, unit not active" certificate=home unit=late.service' in out, out
+          assert "reload failed" not in out, out
+          assert reloads("late") == 0, hanko.succeed("cat /run/late/reloads; systemctl status late.service")
+          late_pid = hanko.succeed("systemctl show -P MainPID late.service")
 
       with subtest("both nameservers served every challenge record to hanko"):
           for soto in [soto1, soto2]:
@@ -252,12 +283,12 @@ pkgs.testers.runNixOSTest {
 
       with subtest("a second run renews nothing"):
           hanko.succeed("systemctl restart hanko.service")
-          assert fingerprints() == before and reloads() == 2, journals()
+          assert fingerprints() == before and reloads() == 2 and reloads("late") == 0, journals()
 
       with subtest("the timer's twin runs and renews nothing"):
           out = run_renew()
           assert out.count("certificate valid") == 2 and "renewing" not in out, out
-          assert fingerprints() == before and reloads() == 2, journals()
+          assert fingerprints() == before and reloads() == 2 and reloads("late") == 0, journals()
 
       with subtest("a concurrent run waits for the lock, then renews nothing"):
           hanko.succeed("systemd-run --unit=holder ${pkgs.util-linux}/bin/flock /var/lib/hanko/.lock ${pkgs.coreutils}/bin/sleep 8")
@@ -270,7 +301,7 @@ pkgs.testers.runNixOSTest {
           hanko.wait_until_succeeds("systemctl show -P ActiveState hanko-renew.service | grep -qx inactive", timeout=30)
           out = hanko.succeed("systemctl show -P Result hanko-renew.service; journalctl --no-pager -u hanko-renew.service")
           assert out.startswith("success") and out.count("certificate valid") == 4 and "renewing" not in out, out
-          assert fingerprints() == before and reloads() == 2, journals()
+          assert fingerprints() == before and reloads() == 2 and reloads("late") == 0, journals()
           for c in certs:
               hanko.succeed(f"openssl x509 -noout -checkend {third + 5} -in /var/lib/hanko/{c}/fullchain.pem")
 
@@ -282,6 +313,9 @@ pkgs.testers.runNixOSTest {
           after = fingerprints()
           assert all(after[c] != before[c] for c in certs), journals()
           assert reloads() == 4, hanko.succeed("cat /run/consumer/reloads")
+          # Active by now, so the renewal reloads it (home only), without a restart.
+          assert reloads("late") == 1, hanko.succeed("cat /run/late/reloads; systemctl status late.service") + journals()
+          assert hanko.succeed("systemctl show -P MainPID late.service") == late_pid, journals()
           assert hanko.succeed("systemctl show -P MainPID consumer.service") == first_pid, journals()
           for c in certs:
               out = hanko.succeed(f"stat -c '%a %U %G' /var/lib/hanko/{c}/fullchain.pem /var/lib/hanko/{c}/key.pem")

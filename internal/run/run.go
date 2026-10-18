@@ -94,16 +94,27 @@ func (r *Runner) one(ctx context.Context, c config.Certificate) error {
 	}
 	r.Log.Info("certificate written", "certificate", c.Name)
 	for _, u := range c.Reload {
-		if err := r.Reload(ctx, u); err != nil {
+		if err := r.Reload(ctx, u); errors.Is(err, ErrInactive) {
+			r.Log.Info("reload skipped, unit not active", "certificate", c.Name, "unit", u)
+		} else if err != nil {
 			r.Log.Error("reload failed", "certificate", c.Name, "unit", u, "err", err)
 		}
 	}
 	return nil
 }
 
+// ErrInactive is returned by Systemctl for a unit that is not active: nothing was reloaded.
+var ErrInactive = errors.New("unit not active")
+
 // Systemctl reloads unit, restarting it when it cannot reload (no ExecReload); allowed for
-// user hanko by the module's polkit rule (ADR 0005).
+// user hanko by the module's polkit rule (ADR 0005). A unit that is not active is skipped
+// (ErrInactive): at boot a consumer ordered After=hanko.service has a start job queued behind
+// hanko, a reload would merge into it and wait for hanko; it reads the new files when it starts.
+// is-active only reads a property, which needs no polkit authorisation.
 func Systemctl(ctx context.Context, unit string) error {
+	if exec.CommandContext(ctx, "systemctl", "is-active", "--quiet", unit).Run() != nil {
+		return ErrInactive
+	}
 	if exec.CommandContext(ctx, "systemctl", "--no-ask-password", "reload", unit).Run() == nil {
 		return nil
 	}
