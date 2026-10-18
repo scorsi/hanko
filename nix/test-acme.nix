@@ -208,22 +208,37 @@ pkgs.testers.runNixOSTest {
           hanko.succeed("systemctl start hanko-renew.service")
           return hanko.succeed("journalctl --no-pager -u hanko-renew.service")
 
+      def wait_capture(soto: QemuMachine) -> None:
+          """Waits for tcpdump to listen; fails at once, with its status and output, if it died."""
+          def listening(last: bool) -> bool:
+              if soto.execute("grep -q 'listening on' /tmp/capture")[0] == 0:
+                  return True
+              dead = soto.execute("systemctl is-active --quiet capture.service")[0] != 0
+              if dead or last:
+                  print(soto.execute("systemctl status --no-pager capture.service; cat /tmp/capture")[1])
+              assert not dead, "capture.service is not active"
+              return False
+          retry(listening, timeout_seconds=300)
+
       acme.start()
       soto1.start()
       soto2.start()
       for soto, me in [(soto1, soto1_ip), (soto2, soto2_ip)]:
           soto.wait_for_unit("annai.service")
           soto.wait_for_open_port(53)
+          # tcpdump exits at once if eth1 is missing or down: wait for the test VLAN's address.
+          soto.wait_until_succeeds(f"ip -4 -br addr show dev eth1 | grep -qwF {me}")
           # Answers sent by this nameserver to hanko only (the VLAN is a shared hub).
           soto.succeed(
               "systemd-run --unit=capture ${pkgs.runtimeShell} -c "
               f"'${pkgs.tcpdump}/bin/tcpdump -i eth1 -n -l -vv src host {me} and src port 53 and dst host {hanko_ip} > /tmp/capture 2>&1'"
           )
-          soto.wait_until_succeeds("grep -q 'listening on' /tmp/capture")
+          wait_capture(soto)
       acme.wait_for_unit("pebble.service")
       acme.wait_for_open_port(443)
 
       with subtest("the boot run issues both certificates"):
+          # Started only now: its boot run's TXT queries must reach captures already listening.
           hanko.start()
           hanko.wait_until_succeeds("systemctl show -P ActiveState hanko.service | grep -qxE 'active|failed'", timeout=600)
           state = hanko.succeed("systemctl show -P ActiveState hanko.service").strip()
