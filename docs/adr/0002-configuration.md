@@ -17,6 +17,7 @@ Every host is deployed through Nix; secrets come from sops as files. The convent
 [acme]
 directory = "https://acme-v02.api.letsencrypt.org/directory"   # staging in tests
 account_key_file = "/var/lib/hanko/account.key"                # created on first run
+accept_terms = true                                            # the CA's terms of service, accepted explicitly
 
 [dns]
 nameservers = ["203.0.113.10:53", "[2001:db8::10]:53"]        # every public NS, by address
@@ -55,6 +56,7 @@ services.hanko = {
   enable = true;
   timer = "hourly";                        # OnCalendar
   acme.directory = "https://acme-staging-v02.api.letsencrypt.org/directory";
+  acme.acceptTerms = true;
   dns = { nameservers = [ … ]; tsigKeyFile = config.sops.secrets.hanko-tsig.path; };
   certificates.home = { hosts = [ "*.uchi.example.org" "uchi.example.org" ]; reload = [ "genkan.service" ]; group = "genkan"; };
 };

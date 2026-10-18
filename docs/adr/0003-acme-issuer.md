@@ -15,7 +15,7 @@ Public certificates come from Let's Encrypt. Internal names (`*.uchi.example.org
 - **Propagation check by address, never through a resolver**: before asking the CA to validate, hanko queries each nameserver directly for the TXT record until every one answers it or `dns.propagation_timeout` elapses. The system resolver is the internal annai, which would answer `NXDOMAIN` forever.
 - **Order flow** (RFC 8555): one order per certificate with all its hosts, one authorization per host, all challenge records placed, then all checked, then all validated, then finalised with a fresh key. Keys are ECDSA P-256, generated per issuance, never reused.
 - **Account**: one ACME account per host, key created by hanko on first run under its state directory, mode `0600`. Terms of service are accepted explicitly by a configuration key; no contact e-mail by default.
-- **Renewal rule**: a certificate is due when it is absent, when its hosts changed, when less than a third of its lifetime remains, or when the CA's ACME Renewal Information (ARI) says so, if the library exposes it. With 90-day certificates and an hourly timer this is 30 days of margin; with short-lived profiles the same rule gives a third of their lifetime.
+- **Renewal rule**: a certificate is due when it is absent, when its hosts changed, when less than a third of its lifetime remains, or when the CA's ACME Renewal Information (ARI) says so, if the library exposes it. With 90-day certificates and an hourly timer this is 30 days of margin; with short-lived profiles the same rule gives a third of their lifetime. The threshold is fixed at one third; there is no configuration key for it.
 - **Rate limits**: Let's Encrypt limits certificates per registered domain and identical certificates per week. hanko never re-issues an unchanged, non-due certificate, so a loop of failed `switch`es cannot burn the limit on duplicates; validation failures are retried by the next timer run, not in a loop. The published limits are checked when this is implemented, not quoted from memory.
 - **Staging**: `acme.directory` is configurable; the `nixosTest` uses Pebble, manual trials use Let's Encrypt staging.
 - **Output**: `fullchain.pem` (leaf then intermediates) and `key.pem`, written atomically (ADR-0005), then the `reload` units.
@@ -32,3 +32,7 @@ Public certificates come from Let's Encrypt. Internal names (`*.uchi.example.org
 - annai's `soto` instances are the only servers hanko writes to; the contract is annai ADR-0010.
 - Issuance takes about a minute: UPDATE fan-out, propagation check, validation, finalisation. A `switch` that adds a certificate waits that long.
 - The ACME account key is the only secret hanko ever creates; losing it costs a new account, nothing else.
+
+## Future work
+
+- A long-running hanko with per-issuer renewal windows and retry delays (ARI), to revisit if very short certificate lifetimes or ARI need it. The oneshot and its fixed third stay until then.

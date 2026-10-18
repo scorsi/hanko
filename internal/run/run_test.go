@@ -27,9 +27,13 @@ type stubIssuer struct {
 	calls int
 	fail  string
 	last  []byte
+	hold  func() // called inside Issue when set
 }
 
 func (s *stubIssuer) Issue(_ context.Context, hosts []string) ([]byte, []byte, error) {
+	if s.hold != nil {
+		s.hold()
+	}
 	s.calls++
 	if slices.Contains(hosts, s.fail) {
 		return nil, nil, errors.New("validation failed")
@@ -116,5 +120,31 @@ func TestRunFailureKeepsGoing(t *testing.T) {
 	}
 	if !slices.Equal(*reloads, home.Reload) {
 		t.Fatalf("reloads %v", *reloads)
+	}
+}
+
+func TestConcurrentRunWaitsThenRenewsNothing(t *testing.T) {
+	r, iss, _ := setup(t)
+	r.Reload = func(context.Context, string) error { return nil }
+	entered, release := make(chan struct{}), make(chan struct{})
+	iss.hold = func() { close(entered); <-release }
+
+	first, second := make(chan error), make(chan error)
+	go func() { first <- r.Run(context.Background(), []config.Certificate{home}) }()
+	<-entered
+	r2 := *r // a separate open of the lock file, as a second process would have
+	go func() { second <- r2.Run(context.Background(), []config.Certificate{home}) }()
+	select {
+	case err := <-second:
+		t.Fatalf("second run finished while the first held the lock: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	iss.hold = nil
+	close(release)
+	if err := <-first; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-second; err != nil || iss.calls != 1 {
+		t.Fatalf("second run: err %v, issues %d, want 1", err, iss.calls)
 	}
 }

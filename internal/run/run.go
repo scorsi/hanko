@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/scorsi/hanko/internal/config"
@@ -32,7 +33,21 @@ type Runner struct {
 
 // Run handles every certificate and returns an error naming each one that was due and could
 // not be obtained; a failed reload is logged only, the certificate on disk being valid (ADR 0001).
+// A blocking flock on <state>/.lock serialises runs, so hanko.service and hanko-renew.service
+// never overlap (e.g. a persistent timer catching up at boot): the second waits, then finds
+// nothing due.
 func (r *Runner) Run(ctx context.Context, certs []config.Certificate) error {
+	lock, err := os.OpenFile(filepath.Join(r.StateDir, ".lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
+	defer lock.Close() // releases the lock
+	// shortcut: the wait ignores ctx, so SIGTERM is honoured only once the lock is held; systemd's
+	// stop timeout still kills a waiting run. Upgrade if runs ever take long enough to matter.
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("lock %s: %w", lock.Name(), err)
+	}
+
 	var errs []error
 	for _, c := range certs {
 		if err := r.one(ctx, c); err != nil {

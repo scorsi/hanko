@@ -24,15 +24,15 @@ Each milestone ends with a passing `nixosTest` (ADR-0001). Versions: v0 = public
 - Atomic file writing, `fullchain.pem` then `key.pem`, permissions of ADR-0005; reload of the listed units through the polkit rule.
 - systemd unit `Type=oneshot` with `RemainAfterExit`, timer with `Persistent=true` and randomised delay, `restartTriggers` on the configuration file, `OnFailure=` hook option (ADR-0001).
 - Unit tests: ACME against a fake directory, UPDATE against a fake nameserver, propagation check with one lagging nameserver, file writing and reload ordering.
-- `nixosTest`: Pebble as the CA, **two annai `soto` VMs** loading the same zone with hanko's TSIG key, one host running hanko with a wildcard certificate and a second certificate for two names; both nameservers receive the TXT, the certificate lands with the right group and mode, the listed unit is reloaded, a second run renews nothing, a run with a lowered threshold renews.
+- `nixosTest`: Pebble as the CA, **two annai `soto` VMs** loading the same zone with hanko's TSIG key, one host running hanko with a wildcard certificate and a second certificate for two names; both nameservers receive the TXT, the certificate lands with the right group and mode, the listed unit is reloaded, a second run renews nothing, and with a short certificate validity configured in Pebble a run renews the certificate once it is due.
 - Done when: the `nixosTest` is green in CI.
 
 ## M2 — Production (v0.2 = v0 complete)
 
 - First certificates against Let's Encrypt staging, then production, through annai's public nameservers (annai M4): the internal wildcard and the public names genkan serves.
-- genkan reloaded by hanko and serving with those certificates; the module of genkan joins the `hanko` group.
+- genkan reloaded by hanko and serving with those certificates; its certificates use hanko's `group = "genkan"`, genkan's own group (ADR-0005).
 - A `switch` that adds a certificate issues it during activation, before the consumer is reloaded.
-- Done when: genkan serves every declared name with a hanko certificate, an added certificate appears in the same `switch`, and a renewal has run through the timer path (threshold lowered once, then restored).
+- Done when: genkan serves every declared name with a hanko certificate, an added certificate appears in the same `switch`, and the timer path (`hanko-renew.service`) ran and renewed nothing.
 
 ## M3 — Operations (v0.3)
 
