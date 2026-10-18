@@ -20,7 +20,7 @@ let
     User = "hanko";
     Group = "hanko";
     StateDirectory = "hanko";
-    StateDirectoryMode = "0750";
+    StateDirectoryMode = "0751";
     CapabilityBoundingSet = "";
     NoNewPrivileges = true;
     ProtectSystem = "strict";
@@ -179,7 +179,7 @@ in
     users.groups.hanko = { };
 
     systemd.tmpfiles.rules = [
-      "d ${state} 0750 hanko hanko -"
+      "d ${state} 0751 hanko hanko -"
     ]
     ++ lib.mapAttrsToList (name: c: "d ${state}/${name} 2750 hanko ${c.group} -") cfg.certificates;
 

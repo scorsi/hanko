@@ -2,9 +2,16 @@
   description = "hanko (判子, the seal) — certificate service for a Nix-managed homelab: package, NixOS module, dev shell";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-26.05-darwin";
+  # Only the M1 nixosTest uses it (two annai `soto` nameservers); never the package or the module.
+  inputs.annai.url = "github:scorsi/annai";
 
   outputs =
-    { self, nixpkgs, ... }:
+    {
+      self,
+      nixpkgs,
+      annai,
+      ...
+    }:
     let
       inherit (nixpkgs) lib;
       forAllSystems = lib.genAttrs [
@@ -47,7 +54,7 @@
       # The package's check phase runs `go vet` and `go test` (nix/package.nix). `module-eval`
       # evaluates the module on every system, macOS included. On Linux, `module` builds the
       # validated TOML (so `hanko check` runs on the module's output) and `module-typo` proves a
-      # typo in it fails the build.
+      # typo in it fails the build. `acme` is the M1 nixosTest (nix/test-acme.nix).
       checks = forAllSystems (
         system:
         let
@@ -82,6 +89,7 @@
           module-typo = pkgs.testers.testBuildFailure (moduleConfig {
             services.hanko.settings.dns.nmaeservers = [ "203.0.113.10:53" ];
           });
+          acme = import ./nix/test-acme.nix { inherit self annai pkgs; };
         }
       );
 
