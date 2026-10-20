@@ -3,7 +3,7 @@
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-26.05-darwin";
   # Only the M1 nixosTest uses it (two annai `soto` nameservers); never the package or the module.
-  inputs.annai.url = "github:scorsi/annai";
+  inputs.annai.url = "git+ssh://git@ishizue.tail9883f3.ts.net:2222/scorsi/annai.git";
 
   outputs =
     {
