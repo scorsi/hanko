@@ -15,6 +15,7 @@ import (
 
 	"github.com/scorsi/hanko/internal/config"
 	"github.com/scorsi/hanko/internal/issuer"
+	"github.com/scorsi/hanko/internal/logging"
 )
 
 // Bounds one certificate's order, propagation wait and validation included.
@@ -37,70 +38,89 @@ type Runner struct {
 // never overlap (e.g. a persistent timer catching up at boot): the second waits, then finds
 // nothing due.
 func (r *Runner) Run(ctx context.Context, certs []config.Certificate) error {
+	start := time.Now()
 	lock, err := os.OpenFile(filepath.Join(r.StateDir, ".lock"), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
+		r.Log.Error("", "event", "run-failed", "err", err)
 		return err
 	}
 	defer lock.Close() // releases the lock
 	// shortcut: the wait ignores ctx, so SIGTERM is honoured only once the lock is held; systemd's
 	// stop timeout still kills a waiting run. Upgrade if runs ever take long enough to matter.
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
-		return fmt.Errorf("lock %s: %w", lock.Name(), err)
+		err = fmt.Errorf("lock %s: %w", lock.Name(), err)
+		r.Log.Error("", "event", "run-failed", "err", err)
+		return err
 	}
 
 	var errs []error
+	renewed := 0
 	for _, c := range certs {
-		if err := r.one(ctx, c); err != nil {
-			r.Log.Error("certificate not obtained", "certificate", c.Name, "err", err)
+		ok, err := r.one(ctx, c)
+		if err != nil {
+			r.Log.Error("", "event", "certificate-failed", "certificate", c.Name, "err", err)
 			errs = append(errs, fmt.Errorf("%s: %w", c.Name, err))
+		} else if ok {
+			renewed++
 		}
 	}
+	r.Log.Info("", "event", "run-completed", "certificates", len(certs), "renewed", renewed, "failed", len(errs), "dur_us", time.Since(start).Microseconds())
 	return errors.Join(errs...)
 }
 
-func (r *Runner) one(ctx context.Context, c config.Certificate) error {
+// one reports whether it renewed c.
+func (r *Runner) one(ctx context.Context, c config.Certificate) (bool, error) {
 	dir := filepath.Join(r.StateDir, c.Name)
 	chain, err := os.ReadFile(filepath.Join(dir, "fullchain.pem"))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+		return false, err
 	}
 	reason := issuer.Due(chain, c.Hosts, time.Now())
 	if _, err := os.Stat(filepath.Join(dir, "key.pem")); reason == "" && err != nil {
 		reason = "key absent"
 	}
 	if reason == "" {
-		r.Log.Info("certificate valid", "certificate", c.Name)
-		return nil
+		r.Log.Info("", "event", "certificate-valid", "certificate", c.Name, "not_after", notAfter(chain))
+		return false, nil
 	}
-	r.Log.Info("renewing", "certificate", c.Name, "reason", reason, "hosts", c.Hosts)
+	r.Log.Info("", "event", "certificate-renewing", "certificate", c.Name, "reason", reason, "hosts", c.Hosts)
 
 	ctx, cancel := context.WithTimeout(ctx, orderTimeout)
 	defer cancel()
 	chain, key, err := r.Issuer.Issue(ctx, c.Hosts)
 	if err != nil {
-		return err
+		return false, err
 	}
 	// The certificate first, the key last: a reader never pairs a new key with an old
 	// certificate missing it (ADR 0005). The setgid directory gives the consumer's group.
 	if err := issuer.WriteFile(dir, "fullchain.pem", chain, 0o640); err != nil {
-		return err
+		return false, err
 	}
 	if err := issuer.WriteFile(dir, "key.pem", key, 0o640); err != nil {
-		return err
+		return false, err
 	}
 	if d, err := os.Open(dir); err == nil {
 		d.Sync() // persist the renames
 		d.Close()
 	}
-	r.Log.Info("certificate written", "certificate", c.Name)
+	r.Log.Info("", "event", "certificate-written", "certificate", c.Name, "not_after", notAfter(chain))
 	for _, u := range c.Reload {
 		if err := r.Reload(ctx, u); errors.Is(err, ErrInactive) {
-			r.Log.Info("reload skipped, unit not active", "certificate", c.Name, "unit", u)
+			r.Log.Info("unit not active", "event", "reload-skipped", "certificate", c.Name, "unit", u)
 		} else if err != nil {
-			r.Log.Error("reload failed", "certificate", c.Name, "unit", u, "err", err)
+			r.Log.Error("", "event", "reload-failed", "certificate", c.Name, "unit", u, "err", err)
 		}
 	}
-	return nil
+	return true, nil
+}
+
+// notAfter is the leaf's expiry in the log schema's ts format, "" when chain does not parse.
+func notAfter(chain []byte) string {
+	t, err := issuer.NotAfter(chain)
+	if err != nil {
+		return ""
+	}
+	return t.UTC().Format(logging.TS)
 }
 
 // ErrInactive is returned by Systemctl for a unit that is not active: nothing was reloaded.

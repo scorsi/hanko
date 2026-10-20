@@ -14,12 +14,14 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/scorsi/hanko/internal/config"
+	"github.com/scorsi/hanko/internal/logging"
 )
 
 // stubIssuer self-signs 90-day certificates, or fails for the hosts in fail.
@@ -200,7 +202,7 @@ func TestSystemctl(t *testing.T) {
 func TestRunSkipsInactiveUnits(t *testing.T) {
 	r, _, _ := setup(t)
 	var out bytes.Buffer
-	r.Log = slog.New(slog.NewTextHandler(&out, nil))
+	r.Log = logging.New(&out, slog.LevelInfo)
 	r.Reload = func(_ context.Context, unit string) error {
 		if unit == "other.service" {
 			return ErrInactive
@@ -210,7 +212,29 @@ func TestRunSkipsInactiveUnits(t *testing.T) {
 	if err := r.Run(context.Background(), []config.Certificate{home}); err != nil {
 		t.Fatal(err)
 	}
-	if s := out.String(); !strings.Contains(s, `msg="reload skipped, unit not active" certificate=home unit=other.service`) || strings.Contains(s, "reload failed") {
+	s := out.String()
+	for _, want := range []*regexp.Regexp{
+		regexp.MustCompile(`"event":"certificate-written","certificate":"home","not_after":"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{9}Z"`),
+		regexp.MustCompile(`"event":"reload-skipped","certificate":"home","unit":"other.service"`),
+		regexp.MustCompile(`"event":"run-completed","certificates":1,"renewed":1,"failed":0,"dur_us":\d+}`),
+	} {
+		if !want.MatchString(s) {
+			t.Errorf("no %s in log:\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, `"event":"reload-failed"`) {
+		t.Fatalf("log:\n%s", s)
+	}
+}
+
+// A run that fails before any certificate (here, no state directory for the lock) says so.
+func TestRunLogsLockFailure(t *testing.T) {
+	var out bytes.Buffer
+	r := &Runner{StateDir: filepath.Join(t.TempDir(), "absent"), Log: logging.New(&out, slog.LevelInfo)}
+	if err := r.Run(context.Background(), nil); err == nil {
+		t.Fatal("want an error")
+	}
+	if s := out.String(); !strings.Contains(s, `"level":"error","v":1,"event":"run-failed","err":`) {
 		t.Fatalf("log:\n%s", s)
 	}
 }

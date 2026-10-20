@@ -80,6 +80,27 @@
         "type": "github"
       }
     },
+    "flake-parts_3": {
+      "inputs": {
+        "nixpkgs-lib": [
+          "nisshi",
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1790898470,
+        "narHash": "sha256-zTwuwezD0w3hpga6a6P8emidzAZFyWqlNeRBlpWOOl8=",
+        "owner": "hercules-ci",
+        "repo": "flake-parts",
+        "rev": "024633cd702b10285db5cb19b40ad48d2399ba60",
+        "type": "github"
+      },
+      "original": {
+        "owner": "hercules-ci",
+        "repo": "flake-parts",
+        "type": "github"
+      }
+    },
     "flake-utils": {
       "inputs": {
         "systems": "systems"
@@ -145,6 +166,28 @@
         "url": "ssh://git@ishizue.tail9883f3.ts.net:2222/scorsi/nisshi.git"
       }
     },
+    "nisshi_2": {
+      "inputs": {
+        "flake-parts": "flake-parts_3",
+        "nixpkgs": [
+          "nixpkgs"
+        ],
+        "treefmt-nix": "treefmt-nix_3"
+      },
+      "locked": {
+        "lastModified": 1792517735,
+        "narHash": "sha256-NftySqo4kOWFqaQtM3W01RbmgJrhfJ4x/0R9dMmBMos=",
+        "ref": "refs/heads/main",
+        "rev": "ee4a22128dff66ffd993867e047a7819a74a675e",
+        "revCount": 15,
+        "type": "git",
+        "url": "ssh://git@ishizue.tail9883f3.ts.net:2222/scorsi/nisshi.git"
+      },
+      "original": {
+        "type": "git",
+        "url": "ssh://git@ishizue.tail9883f3.ts.net:2222/scorsi/nisshi.git"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1792208400,
@@ -180,6 +223,7 @@
     "root": {
       "inputs": {
         "annai": "annai",
+        "nisshi": "nisshi_2",
         "nixpkgs": "nixpkgs_2"
       }
     },
@@ -224,6 +268,27 @@
       "inputs": {
         "nixpkgs": [
           "annai",
+          "nisshi",
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1791885023,
+        "narHash": "sha256-C3alQ2MEt0zVrUSho5NUDo3jmhbff72++bfwoqT9Omo=",
+        "owner": "numtide",
+        "repo": "treefmt-nix",
+        "rev": "0d6d739a833ba9a9c93034862e4a7b061a062a1c",
+        "type": "github"
+      },
+      "original": {
+        "owner": "numtide",
+        "repo": "treefmt-nix",
+        "type": "github"
+      }
+    },
+    "treefmt-nix_3": {
+      "inputs": {
+        "nixpkgs": [
           "nisshi",
           "nixpkgs"
         ]

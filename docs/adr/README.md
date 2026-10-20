@@ -10,3 +10,4 @@ MADR-lite, as in annai: one decision per file, `NNNN-slug.md`, sections Context 
 | [0004](0004-internal-identity.md) | Internal identity: SPIFFE IDs, X.509-SVIDs and the `hanko-ca` signer |
 | [0005](0005-identity-and-permissions.md) | Service identity, file permissions and hardening |
 | [0006](0006-state-directory-traversal.md) | The state directory is traversable by consumers |
+| [0007](0007-observability.md) | Observability: schema v1 logs, no metrics endpoint yet |

@@ -50,11 +50,7 @@ func Due(chain []byte, hosts []string, now time.Time) string {
 	if len(chain) == 0 {
 		return "absent"
 	}
-	b, _ := pem.Decode(chain)
-	if b == nil {
-		return "unreadable"
-	}
-	leaf, err := x509.ParseCertificate(b.Bytes)
+	leaf, err := parseLeaf(chain)
 	switch {
 	case err != nil:
 		return "unreadable"
@@ -64,6 +60,23 @@ func Due(chain []byte, hosts []string, now time.Time) string {
 		return "less than a third of its lifetime left"
 	}
 	return ""
+}
+
+// NotAfter returns the expiry of chain's leaf certificate.
+func NotAfter(chain []byte) (time.Time, error) {
+	leaf, err := parseLeaf(chain)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return leaf.NotAfter, nil
+}
+
+func parseLeaf(chain []byte) (*x509.Certificate, error) {
+	b, _ := pem.Decode(chain)
+	if b == nil {
+		return nil, errors.New("no PEM block")
+	}
+	return x509.ParseCertificate(b.Bytes)
 }
 
 func sameHosts(a, b []string) bool {
@@ -99,7 +112,7 @@ func (i *Issuer) setup(ctx context.Context) error {
 		if !i.ACME.AcceptTerms {
 			return errors.New("acme: no account for this key yet; set accept_terms = true to accept the CA's terms of service")
 		}
-		i.Log.Info("creating ACME account", "directory", i.ACME.Directory)
+		i.Log.Info("", "event", "acme-account-register", "directory", i.ACME.Directory)
 		_, err = c.Register(ctx, &acme.Account{}, acme.AcceptTOS)
 		if errors.Is(err, acme.ErrAccountAlreadyExists) {
 			err = nil
@@ -186,7 +199,7 @@ func (i *Issuer) Issue(ctx context.Context, hosts []string) (chain, key []byte, 
 		defer cancel()
 		for _, r := range placed {
 			if err := i.DNS.Delete(ctx, r.name, r.value); err != nil {
-				i.Log.Warn("challenge record not deleted; the nameserver expires it", "name", r.name, "err", err)
+				i.Log.Warn("the nameserver expires it", "event", "challenge-delete-failed", "name", r.name, "err", err)
 			}
 		}
 	}()

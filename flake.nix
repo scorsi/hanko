@@ -4,12 +4,16 @@
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-26.05-darwin";
   # Only the M1 nixosTest uses it (two annai `soto` nameservers); never the package or the module.
   inputs.annai.url = "git+ssh://git@ishizue.tail9883f3.ts.net:2222/scorsi/annai.git";
+  # Only the M1 nixosTest uses it too: its log validator checks hanko's lines (ADR 0007).
+  inputs.nisshi.url = "git+ssh://git@ishizue.tail9883f3.ts.net:2222/scorsi/nisshi.git";
+  inputs.nisshi.inputs.nixpkgs.follows = "nixpkgs";
 
   outputs =
     {
       self,
       nixpkgs,
       annai,
+      nisshi,
       ...
     }:
     let
@@ -89,7 +93,14 @@
           module-typo = pkgs.testers.testBuildFailure (moduleConfig {
             services.hanko.settings.dns.nmaeservers = [ "203.0.113.10:53" ];
           });
-          acme = import ./nix/test-acme.nix { inherit self annai pkgs; };
+          acme = import ./nix/test-acme.nix {
+            inherit
+              self
+              annai
+              nisshi
+              pkgs
+              ;
+          };
         }
       );
 

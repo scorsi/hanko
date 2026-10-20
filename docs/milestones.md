@@ -37,7 +37,8 @@ Each milestone ends with a passing `nixosTest` (ADR-0001). Versions: v0 = public
 ## M3 — Operations (v0.3)
 
 - `hanko status`: every certificate with issuer, names, expiry and last run result, read from the files; usable by the deployment's monitoring.
-- Structured logs with one summary line per run; failure notification wired through `OnFailure=` in the deployment.
+- ~~Structured logs with one summary line per run~~: done ahead of M3 (ADR-0007, schema v1 lines, `run-completed`).
+- Failure notification wired through `OnFailure=` in the deployment.
 - Done when: a deliberately broken TSIG key produces a non-zero exit, a notification, and `hanko status` showing the certificate still valid.
 
 ## v1 — Internal identity (not scheduled)
