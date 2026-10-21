@@ -443,10 +443,13 @@ pkgs.testers.runNixOSTest {
               assert '"event":"acme-account"' not in out, out
           finally:
               hanko.succeed("umount /var/lib/hanko/cv")
-          for bad, restore in [("chmod 0750 /var/lib/hanko/cv", "chmod 2750 /var/lib/hanko/cv"), ("chmod 2770 /var/lib/hanko/cv", "chmod 2750 /var/lib/hanko/cv"), ("chgrp hanko /var/lib/hanko/cv", "chgrp consumer /var/lib/hanko/cv; chmod 2750 /var/lib/hanko/cv")]:
+          # GNU chmod keeps a directory's setgid bit on a numeric mode like 0750: clear it
+          # symbolically and prove it is gone, or the run legitimately succeeds.
+          for bad, restore in [("chmod g-s /var/lib/hanko/cv; test ! -g /var/lib/hanko/cv", "chmod 2750 /var/lib/hanko/cv"), ("chmod 2770 /var/lib/hanko/cv", "chmod 2750 /var/lib/hanko/cv"), ("chgrp hanko /var/lib/hanko/cv", "chgrp consumer /var/lib/hanko/cv; chmod 2750 /var/lib/hanko/cv")]:
               hanko.succeed(bad)
               hanko.fail("systemctl start hanko-renew.service")
               out = invocation("hanko-renew.service")
+              assert '"event":"certificate-failed","certificate":"cv"' in out, out
               assert '"event":"acme-account"' not in out, out
               hanko.succeed(restore)
           run_renew()
