@@ -1,6 +1,7 @@
 package issuer
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -281,8 +282,28 @@ func setup(t *testing.T, accept bool) (*Issuer, *fakeCA, *fakeDNS) {
 
 var hosts = []string{"*.uchi.example.org", "uchi.example.org", "cv.example.org"}
 
+// accountURIs returns the uri of every acme-account event in a JSON log, and whether an
+// acme-account-register event came first.
+func accountURIs(t *testing.T, log *bytes.Buffer) (uris []string, registered bool) {
+	for line := range strings.Lines(log.String()) {
+		var e struct{ Event, Directory, URI string }
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			t.Fatal(err)
+		}
+		switch e.Event {
+		case "acme-account-register":
+			registered = len(uris) == 0
+		case "acme-account":
+			uris = append(uris, e.URI)
+		}
+	}
+	return uris, registered
+}
+
 func TestIssue(t *testing.T) {
 	i, ca, d := setup(t, true)
+	var log1, log2 bytes.Buffer
+	i.Log = slog.New(slog.NewJSONHandler(&log1, nil))
 	chain, key, err := i.Issue(context.Background(), hosts)
 	if err != nil {
 		t.Fatal(err)
@@ -318,9 +339,23 @@ func TestIssue(t *testing.T) {
 	j, _, _ := setup(t, false)
 	j.ACME, j.DNS = i.ACME, d
 	j.ACME.AcceptTerms = false
+	j.Log = slog.New(slog.NewJSONHandler(&log2, nil))
 	_, key2, err := j.Issue(context.Background(), hosts[:1])
 	if err != nil || slices.Equal(key, key2) || len(ca.accounts) != 1 {
 		t.Fatalf("second issue: %v, accounts %d", err, len(ca.accounts))
+	}
+
+	// Both runs log the account URL (RFC 8657 accounturi=); only the first registers.
+	var thumb string
+	for k := range ca.accounts {
+		thumb = k
+	}
+	uri := ca.url("/account/%s", thumb)
+	if uris, reg := accountURIs(t, &log1); !reg || !slices.Equal(uris, []string{uri}) {
+		t.Fatalf("first run: registered %v, uris %q, want %q\n%s", reg, uris, uri, log1.String())
+	}
+	if uris, reg := accountURIs(t, &log2); reg || !slices.Equal(uris, []string{uri}) {
+		t.Fatalf("second run: registered %v, uris %q, want %q\n%s", reg, uris, uri, log2.String())
 	}
 }
 

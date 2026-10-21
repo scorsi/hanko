@@ -107,20 +107,23 @@ func (i *Issuer) setup(ctx context.Context) error {
 		return err
 	}
 	c := &acme.Client{Key: key, DirectoryURL: i.ACME.Directory, UserAgent: "hanko"}
-	_, err = c.GetReg(ctx, "")
+	acct, err := c.GetReg(ctx, "")
 	if errors.Is(err, acme.ErrNoAccount) {
 		if !i.ACME.AcceptTerms {
 			return errors.New("acme: no account for this key yet; set accept_terms = true to accept the CA's terms of service")
 		}
 		i.Log.Info("", "event", "acme-account-register", "directory", i.ACME.Directory)
-		_, err = c.Register(ctx, &acme.Account{}, acme.AcceptTOS)
+		acct, err = c.Register(ctx, &acme.Account{}, acme.AcceptTOS)
 		if errors.Is(err, acme.ErrAccountAlreadyExists) {
-			err = nil
+			// Register caches the existing account's URL as the client's KID.
+			acct, err = &acme.Account{URI: string(c.KID)}, nil
 		}
 	}
 	if err != nil {
 		return fmt.Errorf("acme account: %w", err)
 	}
+	// Logged by every run that contacts the CA, for RFC 8657 accounturi= in CAA (ADR 0007).
+	i.Log.Info("", "event", "acme-account", "directory", i.ACME.Directory, "uri", acct.URI)
 	i.client = c
 	return nil
 }

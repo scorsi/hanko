@@ -349,12 +349,14 @@ pkgs.testers.runNixOSTest {
       with subtest("every line hanko wrote passes the log schema (ADR 0007)"):
           # Empty input passes the validator: first prove the events are there.
           for unit, events in [
-              ("hanko.service", ["acme-account-register", "certificate-renewing", "certificate-written", "reload-skipped", "certificate-valid", "run-completed"]),
-              ("hanko-renew.service", ["certificate-valid", "certificate-renewing", "certificate-written", "run-completed"]),
+              ("hanko.service", ["acme-account-register", "acme-account", "certificate-renewing", "certificate-written", "reload-skipped", "certificate-valid", "run-completed"]),
+              ("hanko-renew.service", ["acme-account", "certificate-valid", "certificate-renewing", "certificate-written", "run-completed"]),
           ]:
               out = hanko.succeed(journal(unit))
               for e in events:
                   assert f'"event":"{e}"' in out, out
+              # The account URL, for CAA accounturi= (RFC 8657): on the run that registers and on later ones.
+              assert re.search(r'"event":"acme-account","directory":"https://[^"]+","uri":"https://[^"]+"', out), out
               assert re.search(r'"event":"certificate-written","certificate":"home","not_after":"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{9}Z"', out), out
               hanko.succeed(f"{journal(unit)} | ${validateLogs} validate --logs")
     '';

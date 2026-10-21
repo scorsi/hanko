@@ -20,7 +20,8 @@ hanko is a oneshot that listens on nothing (ADR-0001): there is no process alive
   | `run-failed` (the run stopped before any certificate: lock file) | error | `err` |
   | `certificate-valid` | info | `certificate`, `not_after` |
   | `certificate-renewing` | info | `certificate`, `reason`, `hosts` |
-  | `acme-account-register` | info | `directory` |
+  | `acme-account-register` (before the registration request) | info | `directory` |
+  | `acme-account` (amended 2026-10-21, see below) | info | `directory`, `uri` |
   | `certificate-written` | info | `certificate`, `not_after` |
   | `reload-skipped` (unit not active, ADR-0005) | info | `certificate`, `unit` |
   | `reload-failed` | error | `certificate`, `unit`, `err` |
@@ -43,3 +44,7 @@ hanko is a oneshot that listens on nothing (ADR-0001): there is no process alive
 - The M1 `nixosTest` matches full `"event":"…"` members and pipes `journalctl _SYSTEMD_UNIT=hanko.service -o cat` and the same for `hanko-renew.service` into `nisshi validate --logs`, after asserting the expected events exist (empty input passes). nisshi is a test-only flake input; never the package or the module.
 - An event added later must keep the schema: kebab-case name, `err` only at `warn` or `error`, no reserved field.
 - M3's summary-line item is done; `hanko status` and the `OnFailure=` wiring remain.
+
+## Amendment 2026-10-21: the account URL is logged
+
+The deployment pins hanko's ACME account in its CAA records (RFC 8657 `accounturi=`), so the owner must be able to read the account URL; until now only the key was kept. Owner decision: hanko logs it, nothing new is stored. `acme-account` (info, `directory`, `uri`) is written by every run that contacts the CA, once the account is known: after a registration (following `acme-account-register`) and when the key's account already exists (the `onlyReturnExisting` lookup already returns the URL, no extra request). A run with nothing due stays offline (ADR-0001, ADR-0003) and so does not write it; the URL is stable for a given account key, so the last `acme-account` line in the journal or in nisshi gives it. `acme-account-register` keeps its place before the request, so a failed registration still leaves a trace; one event carrying `uri` in both cases keeps a single query for the URL.
