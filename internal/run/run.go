@@ -3,6 +3,7 @@
 package run
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -110,11 +112,28 @@ func (r *Runner) one(ctx context.Context, root *os.Root, c config.Certificate) (
 	if err != nil {
 		return false, err
 	}
+	publish := func(newChain, newKey []byte) error {
+		if err := state.WriteFiles(dir, 0o640, state.File{Name: "fullchain.pem", Data: newChain}, state.File{Name: "key.pem", Data: newKey}); err != nil {
+			return err
+		}
+		chain, key = newChain, newKey
+		r.Log.Info("", "event", "certificate-written", "certificate", c.Name, "not_after", notAfter(chain))
+		return nil
+	}
+	renewed := false
+	// A pair an earlier run issued but did not finish publishing is installed without a new
+	// order: two renames are not atomic together (review H3, ADR 0009).
+	if savedChain, savedKey, ok := issuedPair(pending); ok && issuer.Due(savedChain, c.Hosts, time.Now()) == "" &&
+		!(bytes.Equal(savedChain, chain) && bytes.Equal(savedKey, key)) {
+		if err := publish(savedChain, savedKey); err != nil {
+			return false, err
+		}
+		renewed = true
+	}
 	reason := issuer.Due(chain, c.Hosts, time.Now())
 	if _, err := tls.X509KeyPair(chain, key); reason == "" && err != nil {
 		reason = "key absent or not matching the certificate"
 	}
-	renewed := false
 	if reason == "" {
 		r.Log.Info("", "event", "certificate-valid", "certificate", c.Name, "not_after", notAfter(chain))
 	} else {
@@ -125,21 +144,36 @@ func (r *Runner) one(ctx context.Context, root *os.Root, c config.Certificate) (
 		}
 		pending = []byte("pending")
 		orderCtx, cancel := context.WithTimeout(ctx, orderTimeout)
-		chain, key, err = r.Issuer.Issue(orderCtx, root, c.Hosts)
+		newChain, newKey, err := r.Issuer.Issue(orderCtx, root, c.Hosts)
 		cancel()
 		if err != nil {
 			return false, err
 		}
-		if err := state.WriteFiles(dir, 0o640, state.File{Name: "fullchain.pem", Data: chain}, state.File{Name: "key.pem", Data: key}); err != nil {
+		// The issued pair is durable, owner-only, before publication starts.
+		if err := state.WriteFiles(dir, 0o600, state.File{Name: ".reload-pending", Data: append(slices.Clip(newChain), newKey...)}); err != nil {
+			return false, err
+		}
+		if err := publish(newChain, newKey); err != nil {
 			return false, err
 		}
 		renewed = true
-		r.Log.Info("", "event", "certificate-written", "certificate", c.Name, "not_after", notAfter(chain))
 	}
 	if pending != nil {
 		return renewed, r.reload(ctx, dir, c)
 	}
 	return renewed, nil
+}
+
+// issuedPair splits a .reload-pending marker holding an issued chain followed by its key.
+// The marker written before an order holds no pair.
+func issuedPair(marker []byte) (chain, key []byte, ok bool) {
+	n := bytes.Index(marker, []byte("-----BEGIN PRIVATE KEY-----"))
+	if n <= 0 {
+		return nil, nil, false
+	}
+	chain, key = marker[:n], marker[n:]
+	_, err := tls.X509KeyPair(chain, key)
+	return chain, key, err == nil
 }
 
 func (r *Runner) reload(ctx context.Context, dir *os.Root, c config.Certificate) error {

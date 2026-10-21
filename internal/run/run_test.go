@@ -148,6 +148,38 @@ func TestRunRenewsMismatchedPair(t *testing.T) {
 	}
 }
 
+// Review H3 (batch 2): a publication that fails after renaming fullchain.pem but not key.pem
+// is completed by the next run from the saved pair, without a second order.
+func TestRunResumesInterruptedPublication(t *testing.T) {
+	r, iss, reloads := setup(t)
+	dir := filepath.Join(r.StateDir, "home")
+	// Real fault: key.pem becomes a non-empty directory while the order runs, so its rename fails.
+	iss.hold = func() {
+		if err := os.MkdirAll(filepath.Join(dir, "key.pem", "x"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.Run(context.Background(), []config.Certificate{home}); err == nil {
+		t.Fatal("failed publication reported success")
+	}
+	if len(*reloads) != 0 {
+		t.Fatalf("reloaded a half-published pair: %v", *reloads)
+	}
+	iss.hold = nil
+	if err := os.RemoveAll(filepath.Join(dir, "key.pem")); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Run(context.Background(), []config.Certificate{home}); err != nil {
+		t.Fatal(err)
+	}
+	if iss.calls != 1 || !slices.Equal(*reloads, home.Reload) {
+		t.Fatalf("orders %d, reloads %v", iss.calls, *reloads)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".reload-pending")); !os.IsNotExist(err) {
+		t.Fatalf("marker not cleared: %v", err)
+	}
+}
+
 // H5 of the 6959360 review: a certificate directory that is missing or not as the module makes
 // it fails the certificate before any order, so no issued certificate is thrown away.
 func TestRunChecksDirectoryBeforeOrdering(t *testing.T) {

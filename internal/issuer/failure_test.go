@@ -2,6 +2,7 @@ package issuer
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -146,3 +147,46 @@ func TestIssueCAErrorLogSanitization(t *testing.T) {
 type transportFunc func(*http.Request) (*http.Response, error)
 
 func (f transportFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// Review R2: an existing account's URL must be cached, or the library looks it up again before
+// the order and swallows that request's errors, a rate limit and its deadline included.
+func TestExistingAccountLookedUpOnce(t *testing.T) {
+	first, ca, d := memorySetup(t)
+	if _, _, err := issue(t, first, context.Background(), hosts); err != nil {
+		t.Fatal(err)
+	}
+	next := issuerForCA(t, ca, d, true)
+	next.ACME = first.ACME
+	ca.acctRequests = 0
+	if _, _, err := issue(t, next, context.Background(), hosts); err != nil {
+		t.Fatal(err)
+	}
+	if ca.acctRequests != 1 {
+		t.Fatalf("account requests for an existing account: %d, want 1", ca.acctRequests)
+	}
+}
+
+// Review R3: problems embedded in an invalid authorization or order reach hanko without
+// headers; the deadline comes from the real HTTP response that carried them.
+func TestEmbeddedRateLimitKeepsRetryAfter(t *testing.T) {
+	for _, where := range []string{"authz", "order"} {
+		t.Run(where, func(t *testing.T) {
+			i, ca, _ := memorySetup(t)
+			ca.embed, ca.embedRetry = where, "7200"
+			if _, _, err := issue(t, i, context.Background(), hosts); err == nil {
+				t.Fatal("want failure")
+			}
+			data, err := os.ReadFile(filepath.Join(filepath.Dir(i.ACME.AccountKeyFile), ".retry-after"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var saved retryState
+			if err := json.Unmarshal(data, &saved); err != nil {
+				t.Fatal(err)
+			}
+			if left := time.Until(saved.Until); left < 110*time.Minute {
+				t.Fatalf("saved deadline in %v, want the CA's two hours", left)
+			}
+		})
+	}
+}

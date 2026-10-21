@@ -54,7 +54,11 @@ func (i *Issuer) failure(root *os.Root, operation string, err error) error {
 	now := time.Now()
 	for _, p := range problems {
 		status, problem = p.StatusCode, problemName(p.ProblemType)
-		until := retryAfter(p.Header.Get("Retry-After"), now)
+		header := i.lastRetryAfter // embedded order/authorization problems carry no headers
+		if p.Header != nil {
+			header = p.Header.Get("Retry-After")
+		}
+		until := retryAfter(header, now)
 		_, limited := acme.RateLimit(p)
 		if (limited || p.StatusCode == http.StatusTooManyRequests) && !until.After(now) {
 			until = now.Add(time.Hour)

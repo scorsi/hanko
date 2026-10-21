@@ -220,9 +220,13 @@ pkgs.testers.runNixOSTest {
       def reloads(unit: str = "consumer") -> int:
           return int(hanko.succeed(f"wc -l < /run/{unit}/reloads").strip())
 
+      # Back-to-back failing starts would trip systemd's start rate limit (5 per 10 s), after
+      # which a valid restore still fails with start-limit-hit without running hanko.
+      start_renew = "systemctl reset-failed hanko-renew.service; systemctl start hanko-renew.service"
+
       def run_renew() -> str:
           """Starts the timer's twin, waits for it, returns its journal."""
-          hanko.succeed("systemctl start hanko-renew.service")
+          hanko.succeed(start_renew)
           return hanko.succeed(journal("hanko-renew.service"))
 
       def wait_capture(soto: QemuMachine) -> None:
@@ -374,7 +378,7 @@ pkgs.testers.runNixOSTest {
 
       with subtest("a missing certificate directory fails before any order (review H5)"):
           hanko.succeed("mv /var/lib/hanko/cv /var/lib/hanko-cv-aside")
-          hanko.fail("systemctl start hanko-renew.service")
+          hanko.fail(start_renew)
           out = invocation("hanko-renew.service")
           assert '"event":"certificate-failed","certificate":"cv","err":"directory: ' in out, out
           # The CA is contacted only by an order: no account line, no order.
@@ -423,7 +427,7 @@ pkgs.testers.runNixOSTest {
               "systemctl daemon-reload",
               "runuser -u hanko -- sh -c 'umask 077; echo pending > /var/lib/hanko/home/.reload-pending'",
           )
-          hanko.fail("systemctl start hanko-renew.service")
+          hanko.fail(start_renew)
           out = invocation("hanko-renew.service")
           assert '"event":"reload-failed"' in out and '"renewed":0,"failed":1' in out, out
           assert '"event":"acme-account"' not in out, out
@@ -437,7 +441,7 @@ pkgs.testers.runNixOSTest {
       with subtest("mounted-over or misprovisioned directory fails before ordering (review H6)"):
           hanko.succeed("mkdir -p /run/empty-cert; mount --bind /run/empty-cert /var/lib/hanko/cv")
           try:
-              hanko.fail("systemctl start hanko-renew.service")
+              hanko.fail(start_renew)
               out = invocation("hanko-renew.service")
               assert '"event":"certificate-failed","certificate":"cv"' in out, out
               assert '"event":"acme-account"' not in out, out
@@ -447,7 +451,7 @@ pkgs.testers.runNixOSTest {
           # symbolically and prove it is gone, or the run legitimately succeeds.
           for bad, restore in [("chmod g-s /var/lib/hanko/cv; test ! -g /var/lib/hanko/cv", "chmod 2750 /var/lib/hanko/cv"), ("chmod 2770 /var/lib/hanko/cv", "chmod 2750 /var/lib/hanko/cv"), ("chgrp hanko /var/lib/hanko/cv", "chgrp consumer /var/lib/hanko/cv; chmod 2750 /var/lib/hanko/cv")]:
               hanko.succeed(bad)
-              hanko.fail("systemctl start hanko-renew.service")
+              hanko.fail(start_renew)
               out = invocation("hanko-renew.service")
               assert '"event":"certificate-failed","certificate":"cv"' in out, out
               assert '"event":"acme-account"' not in out, out
@@ -458,7 +462,7 @@ pkgs.testers.runNixOSTest {
           hanko.succeed("mv /var/lib/hanko/cv/fullchain.pem /run/cv-chain.aside")
           soto2.succeed("systemctl stop annai.service")
           try:
-              hanko.fail("systemctl start hanko-renew.service")
+              hanko.fail(start_renew)
               out = invocation("hanko-renew.service")
               assert '"event":"certificate-failed","certificate":"cv"' in out, out
               assert '"event":"certificate-written","certificate":"cv"' not in out, out

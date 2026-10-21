@@ -62,3 +62,13 @@ certificate indefinitely. Batch 2 requests verification and durable delivery fai
 - A successful inactive skip is complete delivery: a later start reads the new files.
 - Two certificate-file renames remain separate, as in H3/H5; the pair check still recovers an
   interruption between them. Pending intent covers a crash after both renames as well.
+
+## Amendment (2026-10-21): resume an interrupted publication
+
+Review re-check of batch 2 (H3): an interrupted or failed publication between the two renames
+spent a CA order to recover. Once an order returns, hanko now replaces the `.reload-pending`
+content with the issued chain followed by its key (still `0600`, synced) before publishing.
+A later run that finds a matching, not-yet-due pair there which differs from the published
+files publishes it again without ordering, then delivers as above. The marker written before
+the order keeps holding no pair. Concurrent readers can still observe a mixed pair during the
+two renames; consumers are reloaded only after both.

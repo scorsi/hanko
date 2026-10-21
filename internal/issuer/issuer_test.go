@@ -54,6 +54,11 @@ type fakeCA struct {
 	reuse    bool
 	mismatch string
 	retry    string
+	// acctRequests counts account lookups and registrations.
+	acctRequests int
+	// embed makes the "authz" or "order" turn invalid with an embedded rateLimited problem,
+	// served with Retry-After: embedRetry.
+	embed, embedRetry string
 }
 
 type fakeAuthz struct {
@@ -122,6 +127,7 @@ func (ca *fakeCA) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	switch kind {
 	case "acct":
+		ca.acctRequests++
 		var req struct {
 			OnlyReturnExisting   bool
 			TermsOfServiceAgreed bool
@@ -170,9 +176,20 @@ func (ca *fakeCA) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ca.json(w, 201, ca.orderJSON(len(ca.orders)-1))
 	case "o":
 		w.Header().Set("Location", ca.url("/o/%d", n))
-		ca.json(w, 200, ca.orderJSON(n))
+		o := ca.orderJSON(n)
+		if ca.embed == "order" {
+			w.Header().Set("Retry-After", ca.embedRetry)
+			o["status"], o["error"] = "invalid", map[string]any{"type": "urn:ietf:params:acme:error:rateLimited"}
+		}
+		ca.json(w, 200, o)
 	case "authz":
-		ca.json(w, 200, ca.authzJSON(n))
+		z := ca.authzJSON(n)
+		if ca.embed == "authz" && ca.authzs[n].status != "pending" {
+			w.Header().Set("Retry-After", ca.embedRetry)
+			z["status"] = "invalid"
+			z["challenges"].([]any)[0].(map[string]any)["error"] = map[string]any{"type": "urn:ietf:params:acme:error:rateLimited"}
+		}
+		ca.json(w, 200, z)
 	case "chal":
 		if ca.reject {
 			ca.problem(w, 400, "unauthorized")

@@ -45,6 +45,23 @@ type Issuer struct {
 
 	client     *acme.Client
 	retryUntil time.Time
+	// lastRetryAfter is the Retry-After of the latest CA response: the library drops the headers
+	// of problems embedded in an invalid order or authorization (ADR 0010).
+	lastRetryAfter string
+}
+
+type captureRetryAfter struct {
+	base http.RoundTripper
+	last *string
+}
+
+func (t captureRetryAfter) RoundTrip(r *http.Request) (*http.Response, error) {
+	resp, err := t.base.RoundTrip(r)
+	*t.last = ""
+	if err == nil {
+		*t.last = resp.Header.Get("Retry-After")
+	}
+	return resp, err
 }
 
 // Due returns why the certificate in chain (PEM, leaf first) must be renewed for hosts, or ""
@@ -119,6 +136,11 @@ func (i *Issuer) setup(ctx context.Context, root *os.Root) error {
 		}
 		return 0
 	}}
+	base := http.DefaultClient.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	c.HTTPClient = &http.Client{Transport: captureRetryAfter{base, &i.lastRetryAfter}}
 	acct, err := c.GetReg(ctx, "")
 	if errors.Is(err, acme.ErrNoAccount) {
 		if !i.ACME.AcceptTerms {
@@ -134,6 +156,12 @@ func (i *Issuer) setup(ctx context.Context, root *os.Root) error {
 	if err != nil {
 		return i.failure(root, "account", err)
 	}
+	if acct.URI == "" {
+		return errors.New("acme account: the CA returned no account URL")
+	}
+	// Without a cached KID the library looks the account up again before each order and
+	// discards that request's error, a rate limit included (review R2).
+	c.KID = acme.KeyID(acct.URI)
 	// Logged by every run that contacts the CA, for RFC 8657 accounturi= in CAA (ADR 0007).
 	i.Log.Info("", "event", "acme-account", "directory", i.ACME.Directory, "uri", acct.URI)
 	i.client = c
