@@ -25,6 +25,9 @@ type ACME struct {
 	// AcceptTerms is the explicit acceptance of the CA's terms of service, needed only to
 	// create the account (ADR 0003); an existing account works without it.
 	AcceptTerms bool `toml:"accept_terms"`
+	// CreateAccount lets a run create the account key when it is absent; without it an absent
+	// key is an error, never a new account (ADR 0008).
+	CreateAccount bool `toml:"create_account"`
 }
 
 type DNS struct {

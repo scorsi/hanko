@@ -40,6 +40,7 @@ let
       directory = cfg.acme.directory;
       account_key_file = cfg.acme.accountKeyFile;
       accept_terms = cfg.acme.acceptTerms;
+      create_account = cfg.acme.createAccount;
     };
     dns = {
       nameservers = cfg.dns.nameservers;
@@ -101,6 +102,15 @@ in
         type = types.bool;
         default = false;
         description = "Accept the CA's terms of service; required to create the account.";
+      };
+      createAccount = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Let a run create the account key when it is absent, and so a new ACME account. Set it for
+          the host's first run only: with it off, an absent key fails the run (`account-key-missing`)
+          instead of silently changing the account that CAA `accounturi=` pins (ADR 0008).
+        '';
       };
     };
 

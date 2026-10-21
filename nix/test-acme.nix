@@ -111,6 +111,8 @@ pkgs.testers.runNixOSTest {
           acme = {
             directory = "https://${nodes.acme.test-support.acme.caDomain}/dir";
             acceptTerms = true;
+            # A fresh VM: the boot run creates the account (ADR 0008).
+            createAccount = true;
           };
           dns = {
             nameservers = [
@@ -345,6 +347,42 @@ pkgs.testers.runNixOSTest {
               out = hanko.succeed(f"stat -c '%a %U %G' /var/lib/hanko/{c}/fullchain.pem /var/lib/hanko/{c}/key.pem")
               assert out == "640 hanko consumer\n640 hanko consumer\n", out
               hanko.succeed(f"openssl x509 -noout -checkend {third + 5} -in /var/lib/hanko/{c}/fullchain.pem")
+
+      def invocation(unit: str) -> str:
+          """The lines of the unit's last run only."""
+          inv = hanko.succeed(f"systemctl show -P InvocationID {unit}").strip()
+          return hanko.succeed(f"journalctl --no-pager _SYSTEMD_INVOCATION_ID={inv} -o cat")
+
+      with subtest("a missing certificate directory fails before any order (review H5)"):
+          hanko.succeed("mv /var/lib/hanko/cv /var/lib/hanko-cv-aside")
+          hanko.fail("systemctl start hanko-renew.service")
+          out = invocation("hanko-renew.service")
+          assert '"event":"certificate-failed","certificate":"cv","err":"certificate directory: ' in out, out
+          # The CA is contacted only by an order: no account line, no order.
+          assert '"event":"acme-account"' not in out and '"event":"certificate-written"' not in out, out
+          assert '"event":"run-completed","certificates":2,"renewed":0,"failed":1,' in out, out
+          hanko.succeed("mv /var/lib/hanko-cv-aside /var/lib/hanko/cv")
+
+      with subtest("a missing account key is refused, never recreated, without create_account (review H4)"):
+          hanko.succeed(
+              "mv /var/lib/hanko/account.key /var/lib/hanko-account.key.aside",
+              "mv /var/lib/hanko/cv/fullchain.pem /var/lib/hanko-cv.pem.aside",
+              "sed -E 's/create_account *= *true/create_account = false/' /etc/hanko/hanko.toml > /run/hanko-strict.toml",
+              "grep -qx 'create_account = false' /run/hanko-strict.toml",
+          )
+          code, out = hanko.execute(
+              "runuser -u hanko -- env STATE_DIRECTORY=/var/lib/hanko ${lib.getExe nodes.hanko.services.hanko.package} run /run/hanko-strict.toml 2>&1"
+          )
+          print(out)
+          assert code != 0 and '"event":"account-key-missing"' in out and '"event":"acme-account"' not in out, out
+          hanko.fail("test -e /var/lib/hanko/account.key")
+          hanko.succeed(
+              "mv /var/lib/hanko-account.key.aside /var/lib/hanko/account.key",
+              "mv /var/lib/hanko-cv.pem.aside /var/lib/hanko/cv/fullchain.pem",
+          )
+          run_renew()
+          out = invocation("hanko-renew.service")
+          assert '"event":"certificate-renewing"' not in out and '"failed":0' in out, out
 
       with subtest("every line hanko wrote passes the log schema (ADR 0007)"):
           # Empty input passes the validator: first prove the events are there.

@@ -4,6 +4,7 @@ package run
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -71,37 +72,39 @@ func (r *Runner) Run(ctx context.Context, certs []config.Certificate) error {
 // one reports whether it renewed c.
 func (r *Runner) one(ctx context.Context, c config.Certificate) (bool, error) {
 	dir := filepath.Join(r.StateDir, c.Name)
-	chain, err := os.ReadFile(filepath.Join(dir, "fullchain.pem"))
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
+	chain, err := readOptional(filepath.Join(dir, "fullchain.pem"))
+	if err != nil {
+		return false, err
+	}
+	key, err := readOptional(filepath.Join(dir, "key.pem"))
+	if err != nil {
 		return false, err
 	}
 	reason := issuer.Due(chain, c.Hosts, time.Now())
-	if _, err := os.Stat(filepath.Join(dir, "key.pem")); reason == "" && err != nil {
-		reason = "key absent"
+	// A run interrupted between the two renames leaves a new certificate with the old key.
+	if _, err := tls.X509KeyPair(chain, key); reason == "" && err != nil {
+		reason = "key absent or not matching the certificate"
 	}
 	if reason == "" {
 		r.Log.Info("", "event", "certificate-valid", "certificate", c.Name, "not_after", notAfter(chain))
 		return false, nil
 	}
 	r.Log.Info("", "event", "certificate-renewing", "certificate", c.Name, "reason", reason, "hosts", c.Hosts)
+	// Before the order: a certificate that cannot be written must not be issued.
+	if err := checkDir(dir); err != nil {
+		return false, err
+	}
 
 	ctx, cancel := context.WithTimeout(ctx, orderTimeout)
 	defer cancel()
-	chain, key, err := r.Issuer.Issue(ctx, c.Hosts)
+	chain, key, err = r.Issuer.Issue(ctx, c.Hosts)
 	if err != nil {
 		return false, err
 	}
 	// The certificate first, the key last: a reader never pairs a new key with an old
 	// certificate missing it (ADR 0005). The setgid directory gives the consumer's group.
-	if err := issuer.WriteFile(dir, "fullchain.pem", chain, 0o640); err != nil {
+	if err := issuer.WriteFiles(dir, 0o640, issuer.File{Name: "fullchain.pem", Data: chain}, issuer.File{Name: "key.pem", Data: key}); err != nil {
 		return false, err
-	}
-	if err := issuer.WriteFile(dir, "key.pem", key, 0o640); err != nil {
-		return false, err
-	}
-	if d, err := os.Open(dir); err == nil {
-		d.Sync() // persist the renames
-		d.Close()
 	}
 	r.Log.Info("", "event", "certificate-written", "certificate", c.Name, "not_after", notAfter(chain))
 	for _, u := range c.Reload {
@@ -112,6 +115,40 @@ func (r *Runner) one(ctx context.Context, c config.Certificate) (bool, error) {
 		}
 	}
 	return true, nil
+}
+
+// readOptional reads path; an absent file is empty, not an error.
+func readOptional(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	return data, err
+}
+
+// checkDir fails unless dir can be the directory the module provisions (ADR 0005): owned by
+// hanko, writable by hanko only, and able to take a new file. The setgid bit and the group are
+// left to the provisioning checks of review finding H6.
+func checkDir(dir string) error {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("certificate directory: %w", err)
+	}
+	st, _ := info.Sys().(*syscall.Stat_t)
+	switch {
+	case !info.IsDir():
+		return fmt.Errorf("certificate directory %s: not a directory", dir)
+	case st != nil && int(st.Uid) != os.Getuid():
+		return fmt.Errorf("certificate directory %s: owned by uid %d, not %d", dir, st.Uid, os.Getuid())
+	case info.Mode().Perm()&0o022 != 0:
+		return fmt.Errorf("certificate directory %s: mode %v, want no group or other write (2750)", dir, info.Mode())
+	}
+	f, err := os.CreateTemp(dir, ".probe.*")
+	if err != nil {
+		return fmt.Errorf("certificate directory: %w", err)
+	}
+	f.Close()
+	return os.Remove(f.Name())
 }
 
 // notAfter is the leaf's expiry in the log schema's ts format, "" when chain does not parse.

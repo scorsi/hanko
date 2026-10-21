@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/scorsi/hanko/internal/config"
+	"github.com/scorsi/hanko/internal/logging"
 )
 
 var b64 = base64.RawURLEncoding
@@ -272,7 +273,7 @@ func setup(t *testing.T, accept bool) (*Issuer, *fakeCA, *fakeDNS) {
 	d := &fakeDNS{txt: map[string][]string{}}
 	ca := newCA(t, d)
 	i := &Issuer{
-		ACME:      config.ACME{Directory: ca.url("/dir"), AccountKeyFile: filepath.Join(t.TempDir(), "account.key"), AcceptTerms: accept},
+		ACME:      config.ACME{Directory: ca.url("/dir"), AccountKeyFile: filepath.Join(t.TempDir(), "account.key"), AcceptTerms: accept, CreateAccount: true},
 		DNS:       d,
 		DNSConfig: config.DNS{PropagationTimeout: "1s"},
 		Log:       slog.New(slog.DiscardHandler),
@@ -338,7 +339,7 @@ func TestIssue(t *testing.T) {
 	// A second process reuses the account and a fresh certificate key.
 	j, _, _ := setup(t, false)
 	j.ACME, j.DNS = i.ACME, d
-	j.ACME.AcceptTerms = false
+	j.ACME.AcceptTerms, j.ACME.CreateAccount = false, false
 	j.Log = slog.New(slog.NewJSONHandler(&log2, nil))
 	_, key2, err := j.Issue(context.Background(), hosts[:1])
 	if err != nil || slices.Equal(key, key2) || len(ca.accounts) != 1 {
@@ -366,6 +367,51 @@ func TestTermsNotAccepted(t *testing.T) {
 	}
 	if len(ca.accounts) != 0 {
 		t.Fatal("account created without accepted terms")
+	}
+}
+
+// H4 of the 6959360 review: an absent account key is created only on request; otherwise the
+// run fails before any request to the CA instead of registering a new account, which the CAA
+// accounturi pin would reject.
+func TestMissingAccountKeyRefused(t *testing.T) {
+	i, ca, _ := setup(t, true)
+	if _, _, err := i.Issue(context.Background(), hosts); err != nil {
+		t.Fatal(err)
+	}
+	// The key lost or hidden by a mount, later, on a host where create_account is off.
+	os.Remove(i.ACME.AccountKeyFile)
+	j, _, d := setup(t, true)
+	j.ACME, j.DNS = i.ACME, d
+	j.ACME.CreateAccount = false
+	var out bytes.Buffer
+	j.Log = logging.New(&out, slog.LevelInfo)
+	requests := ca.nonce
+	if _, _, err := j.Issue(context.Background(), hosts); !errors.Is(err, ErrAccountKeyMissing) {
+		t.Fatalf("want ErrAccountKeyMissing, got %v", err)
+	}
+	if ca.nonce != requests || len(ca.accounts) != 1 || len(d.log) != 0 {
+		t.Fatalf("CA requests %d, accounts %d, dns %v: want none", ca.nonce-requests, len(ca.accounts), d.log)
+	}
+	if _, err := os.Stat(i.ACME.AccountKeyFile); !os.IsNotExist(err) {
+		t.Fatalf("account key created: %v", err)
+	}
+	if s := out.String(); !strings.Contains(s, `"level":"error","v":1,"event":"account-key-missing","path":"`+i.ACME.AccountKeyFile+`","err":`) {
+		t.Fatalf("log:\n%s", s)
+	}
+}
+
+// A failure while staging any file of a pair replaces none of them, and leaves no temporary file.
+func TestWriteFilesReplacesNothingOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.pem"), []byte("old"), 0o640)
+	if err := WriteFiles(dir, 0o640, File{"a.pem", []byte("new")}, File{"no/such.pem", nil}); err == nil {
+		t.Fatal("want an error")
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, "a.pem")); string(got) != "old" {
+		t.Fatalf("a.pem replaced: %q", got)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+		t.Fatalf("left behind: %v", entries)
 	}
 }
 

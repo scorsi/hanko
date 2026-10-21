@@ -102,7 +102,10 @@ func (i *Issuer) setup(ctx context.Context) error {
 	if i.client != nil {
 		return nil
 	}
-	key, err := accountKey(i.ACME.AccountKeyFile)
+	key, err := accountKey(i.ACME.AccountKeyFile, i.ACME.CreateAccount)
+	if errors.Is(err, ErrAccountKeyMissing) {
+		i.Log.Error("", "event", "account-key-missing", "path", i.ACME.AccountKeyFile, "err", err)
+	}
 	if err != nil {
 		return err
 	}
@@ -128,16 +131,25 @@ func (i *Issuer) setup(ctx context.Context) error {
 	return nil
 }
 
-// accountKey loads the account key, creating it mode 0600 on first run (ADR 0003, ADR 0005).
-func accountKey(path string) (*ecdsa.PrivateKey, error) {
+// ErrAccountKeyMissing: the account key file is absent and create_account is not set.
+var ErrAccountKeyMissing = errors.New("account key absent; set acme.create_account = true only to create a new account (ADR 0008)")
+
+// accountKey loads the account key. An absent key is created, mode 0600, only when create is set:
+// otherwise a lost or hidden key would silently become a new account, which the CAA accounturi
+// pin rejects (ADR 0008).
+func accountKey(path string, create bool) (*ecdsa.PrivateKey, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
+		if !create {
+			return nil, ErrAccountKeyMissing
+		}
 		k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		if err != nil {
 			return nil, err
 		}
 		der, _ := x509.MarshalPKCS8PrivateKey(k)
-		if err := WriteFile(filepath.Dir(path), filepath.Base(path), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0o600); err != nil {
+		// Synced, directory included, before the CA ever sees the key.
+		if err := WriteFiles(filepath.Dir(path), 0o600, File{filepath.Base(path), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})}); err != nil {
 			return nil, err
 		}
 		return k, nil
@@ -260,25 +272,56 @@ func (i *Issuer) Issue(ctx context.Context, hosts []string) (chain, key []byte, 
 	return buf.Bytes(), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: kd}), nil
 }
 
-// WriteFile replaces dir/name atomically: a temporary file next to it, synced, then renamed.
-func WriteFile(dir, name string, data []byte, mode os.FileMode) error {
-	f, err := os.CreateTemp(dir, "."+name+".*")
+// File is one file of WriteFiles.
+type File struct {
+	Name string
+	Data []byte
+}
+
+// WriteFiles replaces each dir/<name> atomically, mode mode, in the order given: every temporary
+// file is written and synced before the first rename, so a failed write replaces nothing; the
+// directory is synced after the last rename so that the renames survive a power loss. A crash
+// between two renames can still leave a mix of old and new files: readers of a pair check it
+// (ADR 0005).
+func WriteFiles(dir string, mode os.FileMode, files ...File) error {
+	var tmps []string
+	defer func() {
+		for _, t := range tmps {
+			os.Remove(t) // no-op once renamed
+		}
+	}()
+	for _, file := range files {
+		f, err := os.CreateTemp(dir, "."+file.Name+".*")
+		if err != nil {
+			return err
+		}
+		tmps = append(tmps, f.Name())
+		_, err = f.Write(file.Data)
+		if err == nil {
+			err = f.Chmod(mode)
+		}
+		if err == nil {
+			err = f.Sync()
+		}
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
+			return err
+		}
+	}
+	for i, file := range files {
+		if err := os.Rename(tmps[i], filepath.Join(dir, file.Name)); err != nil {
+			return err
+		}
+	}
+	d, err := os.Open(dir)
 	if err != nil {
 		return err
 	}
-	defer os.Remove(f.Name()) // no-op once renamed
-	_, err = f.Write(data)
-	if err == nil {
-		err = f.Chmod(mode)
-	}
-	if err == nil {
-		err = f.Sync()
-	}
-	if cerr := f.Close(); err == nil {
+	err = d.Sync()
+	if cerr := d.Close(); err == nil {
 		err = cerr
-	}
-	if err == nil {
-		err = os.Rename(f.Name(), filepath.Join(dir, name))
 	}
 	return err
 }

@@ -51,7 +51,15 @@ func (s *stubIssuer) Issue(_ context.Context, hosts []string) ([]byte, []byte, e
 func setup(t *testing.T) (*Runner, *stubIssuer, *[]string) {
 	state := t.TempDir()
 	for _, n := range []string{"home", "cv"} {
-		os.Mkdir(filepath.Join(state, n), 0o750)
+		// As the module provisions them (ADR 0005), less the setgid bit, which the macOS build
+		// sandbox drops.
+		dir := filepath.Join(state, n)
+		if err := os.Mkdir(dir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := checkDir(dir); err != nil {
+			t.Fatal(err)
+		}
 	}
 	iss := &stubIssuer{}
 	var reloads []string
@@ -109,6 +117,58 @@ func TestRunWritesThenReloads(t *testing.T) {
 	}
 }
 
+// H3 of the 6959360 review: a run interrupted between the renames of fullchain.pem and key.pem
+// leaves a new certificate with the old key; the next run must renew, not report it valid.
+func TestRunRenewsMismatchedPair(t *testing.T) {
+	r, iss, _ := setup(t)
+	r.Reload = func(context.Context, string) error { return nil }
+	var out bytes.Buffer
+	r.Log = logging.New(&out, slog.LevelInfo)
+	if err := r.Run(context.Background(), []config.Certificate{home}); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(r.StateDir, "home")
+	for _, bad := range [][]byte{nil, []byte("garbage")} {
+		// The interrupted run: a fresh certificate for the same hosts renamed in, the key not.
+		chain, _, _ := (&stubIssuer{}).Issue(context.Background(), home.Hosts)
+		os.WriteFile(filepath.Join(dir, "fullchain.pem"), chain, 0o640)
+		if bad != nil {
+			os.WriteFile(filepath.Join(dir, "key.pem"), bad, 0o640) // or a corrupt key
+		}
+		calls := iss.calls
+		if err := r.Run(context.Background(), []config.Certificate{home}); err != nil || iss.calls != calls+1 {
+			t.Fatalf("mismatched pair: err %v, issues %d, want %d", err, iss.calls, calls+1)
+		}
+		if _, err := tls.LoadX509KeyPair(filepath.Join(dir, "fullchain.pem"), filepath.Join(dir, "key.pem")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !strings.Contains(out.String(), `"reason":"key absent or not matching the certificate"`) {
+		t.Fatalf("log:\n%s", out.String())
+	}
+}
+
+// H5 of the 6959360 review: a certificate directory that is missing or not as the module makes
+// it fails the certificate before any order, so no issued certificate is thrown away.
+func TestRunChecksDirectoryBeforeOrdering(t *testing.T) {
+	for name, spoil := range map[string]func(dir string) error{
+		"missing":        os.Remove,
+		"a file":         func(dir string) error { os.Remove(dir); return os.WriteFile(dir, nil, 0o600) },
+		"group-writable": func(dir string) error { return os.Chmod(dir, 0o770) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, iss, _ := setup(t)
+			if err := spoil(filepath.Join(r.StateDir, "home")); err != nil {
+				t.Fatal(err)
+			}
+			err := r.Run(context.Background(), []config.Certificate{home})
+			if err == nil || !strings.Contains(err.Error(), "directory") || iss.calls != 0 {
+				t.Fatalf("err %v, issues %d, want an error and no order", err, iss.calls)
+			}
+		})
+	}
+}
+
 func TestRunFailureKeepsGoing(t *testing.T) {
 	r, iss, reloads := setup(t)
 	iss.fail = "cv.example.org"
@@ -133,7 +193,11 @@ func TestConcurrentRunWaitsThenRenewsNothing(t *testing.T) {
 
 	first, second := make(chan error), make(chan error)
 	go func() { first <- r.Run(context.Background(), []config.Certificate{home}) }()
-	<-entered
+	select {
+	case <-entered:
+	case err := <-first:
+		t.Fatalf("first run ended before issuing: %v", err)
+	}
 	r2 := *r // a separate open of the lock file, as a second process would have
 	go func() { second <- r2.Run(context.Background(), []config.Certificate{home}) }()
 	select {

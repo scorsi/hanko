@@ -19,14 +19,15 @@ hanko is a oneshot that listens on nothing (ADR-0001): there is no process alive
   | `config-invalid` | error | `err` |
   | `run-failed` (the run stopped before any certificate: lock file) | error | `err` |
   | `certificate-valid` | info | `certificate`, `not_after` |
-  | `certificate-renewing` | info | `certificate`, `reason`, `hosts` |
+  | `certificate-renewing` (`reason` includes "key absent or not matching the certificate") | info | `certificate`, `reason`, `hosts` |
+  | `account-key-missing` (no account key and `create_account` off, ADR-0008; the certificate then fails) | error | `path`, `err` |
   | `acme-account-register` (before the registration request) | info | `directory` |
   | `acme-account` (amended 2026-10-21, see below) | info | `directory`, `uri` |
   | `certificate-written` | info | `certificate`, `not_after` |
   | `reload-skipped` (unit not active, ADR-0005) | info | `certificate`, `unit` |
   | `reload-failed` | error | `certificate`, `unit`, `err` |
   | `challenge-delete-failed` | warn | `name`, `err` |
-  | `certificate-failed` | error | `certificate`, `err` |
+  | `certificate-failed` (also a certificate directory that is missing or not as the module makes it, before any order) | error | `certificate`, `err` |
   | `run-completed`, once per run that held the lock | info | `certificates`, `renewed`, `failed`, `dur_us` |
 
   `not_after` is the leaf's expiry in the `ts` format. `run-completed` is the per-run summary of M3, pulled forward; it is written whether certificates failed or not, the exit status (ADR-0001) still says which.
