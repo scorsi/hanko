@@ -443,7 +443,7 @@ pkgs.testers.runNixOSTest {
               assert '"event":"acme-account"' not in out, out
           finally:
               hanko.succeed("umount /var/lib/hanko/cv")
-          for bad, restore in [("chmod 0750 /var/lib/hanko/cv", "chmod 2750 /var/lib/hanko/cv"), ("chgrp hanko /var/lib/hanko/cv", "chgrp consumer /var/lib/hanko/cv; chmod 2750 /var/lib/hanko/cv")]:
+          for bad, restore in [("chmod 0750 /var/lib/hanko/cv", "chmod 2750 /var/lib/hanko/cv"), ("chmod 2770 /var/lib/hanko/cv", "chmod 2750 /var/lib/hanko/cv"), ("chgrp hanko /var/lib/hanko/cv", "chgrp consumer /var/lib/hanko/cv; chmod 2750 /var/lib/hanko/cv")]:
               hanko.succeed(bad)
               hanko.fail("systemctl start hanko-renew.service")
               out = invocation("hanko-renew.service")

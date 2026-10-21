@@ -59,12 +59,7 @@ func setup(t *testing.T) (*Runner, *stubIssuer, *[]string) {
 		if err := os.Mkdir(dir, 0o750); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Chmod(dir, os.ModeSetgid|0o750); err != nil {
-			t.Fatal(err)
-		}
-		if info, _ := os.Stat(dir); info.Mode()&os.ModeSetgid == 0 {
-			t.Skip("filesystem drops setgid; run directory tests on Linux")
-		}
+		testutil.SetgidDir(t, dir)
 	}
 	iss := &stubIssuer{}
 	var reloads []string

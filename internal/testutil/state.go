@@ -2,7 +2,9 @@
 package testutil
 
 import (
+	"errors"
 	"os"
+	"syscall"
 	"testing"
 )
 
@@ -15,4 +17,22 @@ func StateDir(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return dir
+}
+
+// SetgidDir gives dir mode 2750, as the module provisions certificate directories (ADR 0005),
+// and skips the test where the environment forbids it: the Nix build sandbox's seccomp filter
+// refuses setgid modes with EPERM, and some macOS filesystems silently drop the bit.
+// The NixOS VM test checks the same directories as a real system.
+func SetgidDir(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.Chmod(dir, os.ModeSetgid|0o750); errors.Is(err, syscall.EPERM) {
+		t.Skipf("environment refuses setgid directories (%v); covered by the NixOS VM test", err)
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(dir); err != nil {
+		t.Fatal(err)
+	} else if info.Mode()&os.ModeSetgid == 0 {
+		t.Skip("filesystem drops setgid; covered by the NixOS VM test")
+	}
 }
