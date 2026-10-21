@@ -40,11 +40,8 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	// systemd sets STATE_DIRECTORY from StateDirectory=hanko.
-	state := os.Getenv("STATE_DIRECTORY")
-	if state == "" {
-		state = "/var/lib/hanko"
-	}
+	state := config.StateDir()
+
 	r := &run.Runner{StateDir: state, Reload: run.Systemctl, Log: log}
 	if cfg.ACME != nil {
 		r.Issuer = &issuer.Issuer{ACME: *cfg.ACME, DNSConfig: *cfg.DNS, Log: log}

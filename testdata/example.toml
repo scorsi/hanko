@@ -11,11 +11,13 @@ propagation_timeout = "120s"
 [[certificates]]
 name = "home"
 issuer = "acme"
+group = "genkan"
 hosts = ["*.uchi.example.org", "uchi.example.org"]
 reload = ["genkan.service"]
 
 [[certificates]]
 name = "cv"
 issuer = "acme"
+group = "genkan"
 hosts = ["cv.example.org", "cv.soto.example.org"]
 reload = ["genkan.service"]

@@ -5,8 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
+	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -44,9 +48,20 @@ type Certificate struct {
 	Hosts    []string `toml:"hosts"`
 	SpiffeID string   `toml:"spiffe_id"`
 	Reload   []string `toml:"reload"`
+	Group    string   `toml:"group"`
 }
 
 var nameRE = regexp.MustCompile(`^[a-z0-9-]+$`)
+var groupRE = regexp.MustCompile(`^[a-zA-Z0-9_][a-zA-Z0-9_-]*$`)
+var unitRE = regexp.MustCompile(`^[a-zA-Z0-9:_.@-]+\.(service|socket|target|mount|automount|swap|timer|path|slice|scope)$`)
+
+// StateDir is systemd's state directory, or the module's default outside a unit.
+func StateDir() string {
+	if s := os.Getenv("STATE_DIRECTORY"); s != "" {
+		return s
+	}
+	return "/var/lib/hanko"
+}
 
 // Timeout is dns.propagation_timeout, already validated by Parse.
 func (d *DNS) Timeout() time.Duration {
@@ -71,9 +86,19 @@ func Parse(data []byte) (*Config, error) {
 	if err := dec.Decode(c); err != nil {
 		var strict *toml.StrictMissingError
 		if errors.As(err, &strict) {
-			return nil, errors.New(strict.String())
+			var errs []error
+			for _, e := range strict.Errors {
+				line, col := e.Position()
+				errs = append(errs, fmt.Errorf("unknown key %q at %d:%d", strings.Join(e.Key(), "."), line, col))
+			}
+			return nil, errors.Join(errs...)
 		}
-		return nil, err
+		var decode *toml.DecodeError
+		if errors.As(err, &decode) {
+			line, col := decode.Position()
+			return nil, fmt.Errorf("invalid TOML at %d:%d", line, col)
+		}
+		return nil, errors.New("invalid TOML")
 	}
 	return c, c.validate()
 }
@@ -86,19 +111,22 @@ func (c *Config) validate() error {
 	acmeUsed := false
 	for i, cert := range c.Certificates {
 		at := fmt.Sprintf("certificates[%d]", i)
-		if cert.Name != "" {
+		if nameRE.MatchString(cert.Name) {
 			at += " " + cert.Name
 		}
 		switch {
-		case !nameRE.MatchString(cert.Name):
-			add("%s: name must match [a-z0-9-]+", at)
+		case len(cert.Name) > 255 || !nameRE.MatchString(cert.Name):
+			add("%s: name must match [a-z0-9-]+ and fit in 255 bytes", at)
 		case seen[cert.Name]:
 			add("%s: duplicate name", at)
 		}
 		seen[cert.Name] = true
+		if !groupRE.MatchString(cert.Group) {
+			add("%s: group must be a group name or numeric gid", at)
+		}
 		for _, u := range cert.Reload {
-			if u == "" {
-				add("%s: empty unit in reload", at)
+			if len(u) > 255 || !unitRE.MatchString(u) || strings.HasPrefix(u, "-") || strings.Contains(u, "@.") || strings.Count(u, "@") > 1 {
+				add("%s: reload must contain literal unit names", at)
 			}
 		}
 		switch cert.Issuer {
@@ -107,21 +135,43 @@ func (c *Config) validate() error {
 			if len(cert.Hosts) == 0 {
 				add("%s: issuer acme needs hosts", at)
 			}
+			for j, h := range cert.Hosts {
+				if !validHost(h) {
+					add("%s: hosts[%d] must be a DNS hostname or leftmost wildcard", at, j)
+				} else {
+					c.Certificates[i].Hosts[j] = strings.ToLower(h)
+				}
+			}
 			if cert.SpiffeID != "" {
 				add("%s: spiffe_id belongs to the internal issuer, not acme", at)
 			}
 		case "internal":
 			add("%s: issuer internal is v1 and not supported by this version", at)
 		default:
-			add("%s: unknown issuer %q (want acme)", at, cert.Issuer)
+			add("%s: unknown issuer (want acme)", at)
 		}
 	}
 
 	if acmeUsed {
 		if c.ACME == nil {
 			add("acme: table required by acme certificates")
-		} else if c.ACME.Directory == "" || c.ACME.AccountKeyFile == "" {
-			add("acme: directory and account_key_file are required")
+		} else {
+			u, err := url.Parse(c.ACME.Directory)
+			if err != nil || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" ||
+				(u.Scheme != "https" && !(u.Scheme == "http" && net.ParseIP(u.Hostname()).IsLoopback())) {
+				add("acme: directory must be an HTTPS URL without credentials, query or fragment (HTTP only on loopback)")
+			} else if p := u.Port(); p != "" && !validPort(p) {
+				add("acme: directory has an invalid port")
+			}
+			state := StateDir()
+			if !cleanAbsolute(state) || state == "/" {
+				add("state directory must be a clean absolute directory path")
+			}
+			key := c.ACME.AccountKeyFile
+			base := filepath.Base(key)
+			if !cleanAbsolute(key) || filepath.Dir(key) != state || base == ".lock" || base == ".retry-after" || seen[base] {
+				add("acme: account_key_file must be directly in the state directory, distinct from internal state files and certificate directories")
+			}
 		}
 		c.validateDNS(add)
 	} else {
@@ -144,14 +194,47 @@ func (c *Config) validateDNS(add func(string, ...any)) {
 		add("dns: nameservers must not be empty")
 	}
 	for _, ns := range c.DNS.Nameservers {
-		if _, _, err := net.SplitHostPort(ns); err != nil {
-			add("dns: nameserver %q: %v", ns, err)
+		addr, err := netip.ParseAddrPort(ns)
+		if err != nil || addr.Port() == 0 || addr.Addr().Zone() != "" {
+			add("dns: nameserver must be a numeric IP address with port 1..65535")
 		}
 	}
-	if c.DNS.TSIGKeyFile == "" {
-		add("dns: tsig_key_file is required")
+	if !cleanAbsolute(c.DNS.TSIGKeyFile) {
+		add("dns: tsig_key_file must be a clean absolute path")
+	} else if rel, err := filepath.Rel(StateDir(), c.DNS.TSIGKeyFile); err == nil && filepath.IsLocal(rel) {
+		add("dns: tsig_key_file must be outside the state directory")
 	}
 	if d, err := time.ParseDuration(c.DNS.PropagationTimeout); err != nil || d <= 0 {
-		add("dns: propagation_timeout %q must be a positive duration such as \"120s\"", c.DNS.PropagationTimeout)
+		add("dns: propagation_timeout must be a positive duration such as \"120s\"")
 	}
+}
+
+func cleanAbsolute(s string) bool {
+	return filepath.IsAbs(s) && filepath.Clean(s) == s && !strings.ContainsAny(s, "\x00\n\r")
+}
+
+func validPort(s string) bool {
+	n, err := strconv.ParseUint(s, 10, 16)
+	return err == nil && n > 0
+}
+
+func validHost(s string) bool {
+	if len(s) > 253 {
+		return false
+	}
+	s = strings.TrimPrefix(s, "*.")
+	if !strings.Contains(s, ".") || net.ParseIP(s) != nil {
+		return false
+	}
+	for _, label := range strings.Split(s, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, c := range label {
+			if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-') {
+				return false
+			}
+		}
+	}
+	return true
 }

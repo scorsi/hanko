@@ -10,20 +10,23 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"path/filepath"
+	"os/user"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/scorsi/hanko/internal/config"
 	"github.com/scorsi/hanko/internal/issuer"
 	"github.com/scorsi/hanko/internal/logging"
+	"github.com/scorsi/hanko/internal/state"
 )
 
 // Bounds one certificate's order, propagation wait and validation included.
 const orderTimeout = 10 * time.Minute
 
 type Issuer interface {
-	Issue(ctx context.Context, hosts []string) (chain, key []byte, err error)
+	Issue(ctx context.Context, root *os.Root, hosts []string) (chain, key []byte, err error)
 }
 
 type Runner struct {
@@ -34,17 +37,24 @@ type Runner struct {
 }
 
 // Run handles every certificate and returns an error naming each one that was due and could
-// not be obtained; a failed reload is logged only, the certificate on disk being valid (ADR 0001).
+// not be obtained or delivered. Pending reloads survive a crash and are retried without an order.
 // A blocking flock on <state>/.lock serialises runs, so hanko.service and hanko-renew.service
 // never overlap (e.g. a persistent timer catching up at boot): the second waits, then finds
 // nothing due.
 func (r *Runner) Run(ctx context.Context, certs []config.Certificate) error {
 	start := time.Now()
-	lock, err := os.OpenFile(filepath.Join(r.StateDir, ".lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	root, err := state.Open(r.StateDir)
 	if err != nil {
 		r.Log.Error("", "event", "run-failed", "err", err)
 		return err
 	}
+	defer root.Close()
+	lock, err := state.OpenFile(root, ".lock", os.O_CREATE|os.O_RDWR, 0o600, os.Getegid())
+	if err != nil {
+		r.Log.Error("", "event", "run-failed", "err", err)
+		return err
+	}
+
 	defer lock.Close() // releases the lock
 	// shortcut: the wait ignores ctx, so SIGTERM is honoured only once the lock is held; systemd's
 	// stop timeout still kills a waiting run. Upgrade if runs ever take long enough to matter.
@@ -57,11 +67,12 @@ func (r *Runner) Run(ctx context.Context, certs []config.Certificate) error {
 	var errs []error
 	renewed := 0
 	for _, c := range certs {
-		ok, err := r.one(ctx, c)
+		ok, err := r.one(ctx, root, c)
 		if err != nil {
 			r.Log.Error("", "event", "certificate-failed", "certificate", c.Name, "err", err)
 			errs = append(errs, fmt.Errorf("%s: %w", c.Name, err))
-		} else if ok {
+		}
+		if ok {
 			renewed++
 		}
 	}
@@ -70,85 +81,88 @@ func (r *Runner) Run(ctx context.Context, certs []config.Certificate) error {
 }
 
 // one reports whether it renewed c.
-func (r *Runner) one(ctx context.Context, c config.Certificate) (bool, error) {
-	dir := filepath.Join(r.StateDir, c.Name)
-	chain, err := readOptional(filepath.Join(dir, "fullchain.pem"))
+func (r *Runner) one(ctx context.Context, root *os.Root, c config.Certificate) (bool, error) {
+	gid, err := strconv.Atoi(c.Group)
+	if err != nil {
+		group, err := user.LookupGroup(c.Group)
+		if err != nil {
+			return false, fmt.Errorf("certificate directory: lookup group: %w", err)
+		}
+		gid, err = strconv.Atoi(group.Gid)
+		if err != nil {
+			return false, err
+		}
+	}
+	dir, err := state.Directory(root, c.Name, gid, true)
 	if err != nil {
 		return false, err
 	}
-	key, err := readOptional(filepath.Join(dir, "key.pem"))
+	defer dir.Close()
+	chain, err := state.ReadOptional(dir, "fullchain.pem", 0o640, gid)
+	if err != nil {
+		return false, err
+	}
+	key, err := state.ReadOptional(dir, "key.pem", 0o640, gid)
+	if err != nil {
+		return false, err
+	}
+	pending, err := state.ReadOptional(dir, ".reload-pending", 0o600, gid)
 	if err != nil {
 		return false, err
 	}
 	reason := issuer.Due(chain, c.Hosts, time.Now())
-	// A run interrupted between the two renames leaves a new certificate with the old key.
 	if _, err := tls.X509KeyPair(chain, key); reason == "" && err != nil {
 		reason = "key absent or not matching the certificate"
 	}
+	renewed := false
 	if reason == "" {
 		r.Log.Info("", "event", "certificate-valid", "certificate", c.Name, "not_after", notAfter(chain))
-		return false, nil
+	} else {
+		r.Log.Info("", "event", "certificate-renewing", "certificate", c.Name, "reason", reason, "hosts", c.Hosts)
+		// Persist intent before the order: also proves the directory is writable before spending it.
+		if err := state.WriteFiles(dir, 0o600, state.File{Name: ".reload-pending", Data: []byte("pending\n")}); err != nil {
+			return false, err
+		}
+		pending = []byte("pending")
+		orderCtx, cancel := context.WithTimeout(ctx, orderTimeout)
+		chain, key, err = r.Issuer.Issue(orderCtx, root, c.Hosts)
+		cancel()
+		if err != nil {
+			return false, err
+		}
+		if err := state.WriteFiles(dir, 0o640, state.File{Name: "fullchain.pem", Data: chain}, state.File{Name: "key.pem", Data: key}); err != nil {
+			return false, err
+		}
+		renewed = true
+		r.Log.Info("", "event", "certificate-written", "certificate", c.Name, "not_after", notAfter(chain))
 	}
-	r.Log.Info("", "event", "certificate-renewing", "certificate", c.Name, "reason", reason, "hosts", c.Hosts)
-	// Before the order: a certificate that cannot be written must not be issued.
-	if err := checkDir(dir); err != nil {
-		return false, err
+	if pending != nil {
+		return renewed, r.reload(ctx, dir, c)
 	}
+	return renewed, nil
+}
 
-	ctx, cancel := context.WithTimeout(ctx, orderTimeout)
-	defer cancel()
-	chain, key, err = r.Issuer.Issue(ctx, c.Hosts)
-	if err != nil {
-		return false, err
-	}
-	// The certificate first, the key last: a reader never pairs a new key with an old
-	// certificate missing it (ADR 0005). The setgid directory gives the consumer's group.
-	if err := issuer.WriteFiles(dir, 0o640, issuer.File{Name: "fullchain.pem", Data: chain}, issuer.File{Name: "key.pem", Data: key}); err != nil {
-		return false, err
-	}
-	r.Log.Info("", "event", "certificate-written", "certificate", c.Name, "not_after", notAfter(chain))
+func (r *Runner) reload(ctx context.Context, dir *os.Root, c config.Certificate) error {
+	var errs []error
 	for _, u := range c.Reload {
-		if err := r.Reload(ctx, u); errors.Is(err, ErrInactive) {
+		// Each consumer has its own budget, independent of issuance and detached DNS cleanup.
+		reloadCtx, cancel := context.WithTimeout(ctx, time.Minute)
+		err := r.Reload(reloadCtx, u)
+		cancel()
+		if errors.Is(err, ErrInactive) {
 			r.Log.Info("unit not active", "event", "reload-skipped", "certificate", c.Name, "unit", u)
 		} else if err != nil {
 			r.Log.Error("", "event", "reload-failed", "certificate", c.Name, "unit", u, "err", err)
+			errs = append(errs, fmt.Errorf("reload %s: %w", u, err))
 		}
 	}
-	return true, nil
-}
-
-// readOptional reads path; an absent file is empty, not an error.
-func readOptional(path string) ([]byte, error) {
-	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
+	if err := errors.Join(errs...); err != nil {
+		return err
 	}
-	return data, err
-}
-
-// checkDir fails unless dir can be the directory the module provisions (ADR 0005): owned by
-// hanko, writable by hanko only, and able to take a new file. The setgid bit and the group are
-// left to the provisioning checks of review finding H6.
-func checkDir(dir string) error {
-	info, err := os.Stat(dir)
-	if err != nil {
-		return fmt.Errorf("certificate directory: %w", err)
+	if err := dir.Remove(".reload-pending"); err != nil {
+		return err
 	}
-	st, _ := info.Sys().(*syscall.Stat_t)
-	switch {
-	case !info.IsDir():
-		return fmt.Errorf("certificate directory %s: not a directory", dir)
-	case st != nil && int(st.Uid) != os.Getuid():
-		return fmt.Errorf("certificate directory %s: owned by uid %d, not %d", dir, st.Uid, os.Getuid())
-	case info.Mode().Perm()&0o022 != 0:
-		return fmt.Errorf("certificate directory %s: mode %v, want no group or other write (2750)", dir, info.Mode())
-	}
-	f, err := os.CreateTemp(dir, ".probe.*")
-	if err != nil {
-		return fmt.Errorf("certificate directory: %w", err)
-	}
-	f.Close()
-	return os.Remove(f.Name())
+	return state.Sync(dir)
 }
 
 // notAfter is the leaf's expiry in the log schema's ts format, "" when chain does not parse.
@@ -167,17 +181,40 @@ var ErrInactive = errors.New("unit not active")
 // user hanko by the module's polkit rule (ADR 0005). A unit that is not active is skipped
 // (ErrInactive): at boot a consumer ordered After=hanko.service has a start job queued behind
 // hanko, a reload would merge into it and wait for hanko; it reads the new files when it starts.
-// is-active only reads a property, which needs no polkit authorisation.
+// show only reads properties, which needs no polkit authorisation.
 func Systemctl(ctx context.Context, unit string) error {
-	if exec.CommandContext(ctx, "systemctl", "is-active", "--quiet", unit).Run() != nil {
-		return ErrInactive
-	}
-	if exec.CommandContext(ctx, "systemctl", "--no-ask-password", "reload", unit).Run() == nil {
-		return nil
-	}
-	out, err := exec.CommandContext(ctx, "systemctl", "--no-ask-password", "restart", unit).CombinedOutput()
+	// A property read distinguishes a stopped unit from a failed command or D-Bus connection.
+	out, err := exec.CommandContext(ctx, "systemctl", "show", "--property=LoadState,ActiveState,CanReload", "--", unit).Output()
 	if err != nil {
-		return fmt.Errorf("systemctl restart %s: %v: %s", unit, err, out)
+		return fmt.Errorf("systemctl show %s: %w", unit, err)
+	}
+	props := map[string]string{}
+	for line := range strings.Lines(string(out)) {
+		k, v, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if ok {
+			props[k] = v
+		}
+	}
+	if props["LoadState"] != "loaded" {
+		return fmt.Errorf("systemctl show %s: unit not loaded", unit)
+	}
+	switch props["ActiveState"] {
+	case "inactive", "failed", "activating", "deactivating":
+		return ErrInactive
+	case "active", "reloading":
+	default:
+		return fmt.Errorf("systemctl show %s: unknown active state", unit)
+	}
+	verb := "reload"
+	switch props["CanReload"] {
+	case "no":
+		verb = "restart"
+	case "yes":
+	default:
+		return fmt.Errorf("systemctl show %s: missing reload capability", unit)
+	}
+	if err := exec.CommandContext(ctx, "systemctl", "--no-ask-password", verb, "--", unit).Run(); err != nil {
+		return fmt.Errorf("systemctl %s %s: %w", verb, unit, err)
 	}
 	return nil
 }

@@ -21,6 +21,28 @@ let
     Group = "hanko";
     StateDirectory = "hanko";
     StateDirectoryMode = "0751";
+    # Default new files to owner-only; explicit chmod(0640) still permits certificate consumers.
+    UMask = "0077";
+    LimitCORE = 0; # Private keys must not land in ordinary core files.
+    CoredumpFilter = "0x0"; # Exclude memory mappings even when the host pipes dumps to a collector.
+    ProtectKernelTunables = true; # No sysctl writes.
+    ProtectKernelModules = true; # No module loading or module-tree access.
+    ProtectKernelLogs = true; # No kernel log access.
+    ProtectControlGroups = true; # No cgroup management.
+    ProtectClock = true; # TLS needs clock reads, never clock changes.
+    RestrictNamespaces = true; # Neither Go networking nor systemctl creates namespaces.
+    RestrictRealtime = true; # No realtime scheduling is needed.
+    RestrictSUIDSGID = true; # No set-id files; certificate setgid directories are provisioned outside the unit.
+    LockPersonality = true; # Both executables use the native process personality.
+    SystemCallArchitectures = "native"; # No foreign-ABI executables.
+    # One full run of lock contention, then every order (10m), cleanup (1m) and reload (1m).
+    TimeoutStartSec =
+      2
+      * (
+        60
+        + 660 * builtins.length cfg.settings.certificates
+        + 60 * lib.foldl' (n: c: n + builtins.length (c.reload or [ ])) 0 cfg.settings.certificates
+      );
     CapabilityBoundingSet = "";
     NoNewPrivileges = true;
     ProtectSystem = "strict";
@@ -49,7 +71,12 @@ let
     };
     certificates = lib.mapAttrsToList (name: c: {
       inherit name;
-      inherit (c) issuer hosts reload;
+      inherit (c)
+        issuer
+        hosts
+        reload
+        group
+        ;
     }) cfg.certificates;
   };
 
@@ -157,7 +184,7 @@ in
               example = "genkan";
               description = ''
                 Group of the certificate's directory (mode 2750, setgid): who may read
-                `${state}/<name>/fullchain.pem` and `key.pem`. Not part of the file.
+                `${state}/<name>/fullchain.pem` and `key.pem`. Included in the file so hanko verifies the directory group.
               '';
             };
           };

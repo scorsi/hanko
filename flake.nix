@@ -71,22 +71,46 @@
           default = self.packages.${system}.default;
 
           # Forces the configuration at eval time; the store paths are dropped so nothing is built.
-          module-eval = pkgs.runCommand "hanko-module-eval" { } ''
-            echo ${
-              lib.escapeShellArg (
-                builtins.unsafeDiscardStringContext (
-                  builtins.toJSON {
-                    inherit (evaluated.systemd) tmpfiles;
-                    unit = evaluated.systemd.services.hanko.serviceConfig;
-                    renew = evaluated.systemd.services.hanko-renew.serviceConfig;
-                    timer = evaluated.systemd.timers.hanko.timerConfig;
-                    polkit = evaluated.security.polkit.extraConfig;
-                    config = evaluated.environment.etc."hanko/hanko.toml".source.name;
-                  }
-                )
+          module-eval =
+            assert lib.all
+              (
+                unit:
+                unit.UMask == "0077"
+                && unit.LimitCORE == 0
+                && unit.CoredumpFilter == "0x0"
+                && unit.ProtectKernelTunables
+                && unit.ProtectKernelModules
+                && unit.ProtectKernelLogs
+                && unit.ProtectControlGroups
+                && unit.ProtectClock
+                && unit.RestrictNamespaces
+                && unit.RestrictRealtime
+                && unit.RestrictSUIDSGID
+                && unit.LockPersonality
+                && unit.SystemCallArchitectures == "native"
+                && unit.TimeoutStartSec > 660
               )
-            } > $out
-          '';
+              [
+                evaluated.systemd.services.hanko.serviceConfig
+                evaluated.systemd.services.hanko-renew.serviceConfig
+              ];
+            assert lib.all (c: c.group != "") evaluated.services.hanko.settings.certificates;
+            pkgs.runCommand "hanko-module-eval" { } ''
+              echo ${
+                lib.escapeShellArg (
+                  builtins.unsafeDiscardStringContext (
+                    builtins.toJSON {
+                      inherit (evaluated.systemd) tmpfiles;
+                      unit = evaluated.systemd.services.hanko.serviceConfig;
+                      renew = evaluated.systemd.services.hanko-renew.serviceConfig;
+                      timer = evaluated.systemd.timers.hanko.timerConfig;
+                      polkit = evaluated.security.polkit.extraConfig;
+                      config = evaluated.environment.etc."hanko/hanko.toml".source.name;
+                    }
+                  )
+                )
+              } > $out
+            '';
         }
         // lib.optionalAttrs (lib.hasSuffix "-linux" system) {
           module = moduleConfig { };

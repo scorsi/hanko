@@ -30,6 +30,8 @@ import (
 
 	"github.com/scorsi/hanko/internal/config"
 	"github.com/scorsi/hanko/internal/logging"
+	"github.com/scorsi/hanko/internal/state"
+	"github.com/scorsi/hanko/internal/testutil"
 )
 
 var b64 = base64.RawURLEncoding
@@ -48,6 +50,10 @@ type fakeCA struct {
 	kids     map[string]string
 	authzs   []*fakeAuthz
 	orders   []*fakeOrder
+	reject   bool
+	reuse    bool
+	mismatch string
+	retry    string
 }
 
 type fakeAuthz struct {
@@ -62,13 +68,18 @@ type fakeOrder struct {
 	cert  []byte
 }
 
-func newCA(t *testing.T, d *fakeDNS) *fakeCA {
+func makeCA(d *fakeDNS) *fakeCA {
 	k, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "fake CA"}, IsCA: true, BasicConstraintsValid: true,
 		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(24 * time.Hour), KeyUsage: x509.KeyUsageCertSign}
 	der, _ := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &k.PublicKey, k)
 	cert, _ := x509.ParseCertificate(der)
 	ca := &fakeCA{dns: d, caKey: k, caCert: cert, accounts: map[string]bool{}, kids: map[string]string{}}
+	return ca
+}
+
+func newCA(t *testing.T, d *fakeDNS) *fakeCA {
+	ca := makeCA(d)
 	ca.srv = httptest.NewServer(ca)
 	t.Cleanup(ca.srv.Close)
 	return ca
@@ -131,6 +142,11 @@ func (ca *fakeCA) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			ca.json(w, 201, map[string]any{"status": "valid"})
 		}
 	case "order":
+		if ca.retry != "" {
+			w.Header().Set("Retry-After", ca.retry)
+			ca.problem(w, 429, "rateLimited")
+			return
+		}
 		if !ca.accounts[thumb] {
 			ca.problem(w, 403, "unauthorized")
 			return
@@ -144,6 +160,11 @@ func (ca *fakeCA) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			ca.authzs = append(ca.authzs, &fakeAuthz{value: strings.TrimPrefix(id.Value, "*."), wildcard: strings.HasPrefix(id.Value, "*."),
 				token: fmt.Sprint("token-", len(ca.authzs)), status: "pending", thumb: thumb})
 		}
+		if ca.reuse {
+			for _, n := range o.authz {
+				ca.authzs[n].status = "valid"
+			}
+		}
 		ca.orders = append(ca.orders, o)
 		w.Header().Set("Location", ca.url("/o/%d", len(ca.orders)-1))
 		ca.json(w, 201, ca.orderJSON(len(ca.orders)-1))
@@ -153,6 +174,10 @@ func (ca *fakeCA) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "authz":
 		ca.json(w, 200, ca.authzJSON(n))
 	case "chal":
+		if ca.reject {
+			ca.problem(w, 400, "unauthorized")
+			return
+		}
 		z := ca.authzs[n]
 		ka := sha256.Sum256([]byte(z.token + "." + z.thumb))
 		if slices.Contains(ca.dns.lookup("_acme-challenge."+z.value+"."), b64.EncodeToString(ka[:])) {
@@ -173,7 +198,14 @@ func (ca *fakeCA) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		tmpl := &x509.Certificate{SerialNumber: big.NewInt(int64(n + 2)), DNSNames: csr.DNSNames,
 			NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(90 * 24 * time.Hour)}
-		leaf, _ := x509.CreateCertificate(rand.Reader, tmpl, ca.caCert, csr.PublicKey, ca.caKey)
+		pub := csr.PublicKey
+		if ca.mismatch == "key" {
+			pub = &ca.caKey.PublicKey
+		}
+		if ca.mismatch == "hosts" {
+			tmpl.DNSNames = []string{"other.example.org"}
+		}
+		leaf, _ := x509.CreateCertificate(rand.Reader, tmpl, ca.caCert, pub, ca.caKey)
 		o.cert = append(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf}), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ca.caCert.Raw})...)
 		w.Header().Set("Location", ca.url("/o/%d", n))
 		ca.json(w, 200, ca.orderJSON(n))
@@ -231,10 +263,12 @@ func (ca *fakeCA) problem(w http.ResponseWriter, code int, typ string) {
 
 // fakeDNS records what the issuer placed, and in which order.
 type fakeDNS struct {
-	mu      sync.Mutex
-	txt     map[string][]string
-	log     []string
-	failAdd int // the nth Add fails (1-based), 0 never
+	mu               sync.Mutex
+	txt              map[string][]string
+	log              []string
+	wait             func(context.Context) error
+	cleanupCancelled bool
+	failAdd          int // the nth Add fails (1-based), 0 never
 }
 
 func (d *fakeDNS) Add(_ context.Context, name, value string) error {
@@ -248,18 +282,22 @@ func (d *fakeDNS) Add(_ context.Context, name, value string) error {
 	return nil
 }
 
-func (d *fakeDNS) Delete(_ context.Context, name, value string) error {
+func (d *fakeDNS) Delete(ctx context.Context, name, value string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.cleanupCancelled = d.cleanupCancelled || ctx.Err() != nil
 	d.log = append(d.log, "delete "+name)
 	d.txt[name] = slices.DeleteFunc(d.txt[name], func(s string) bool { return s == value })
 	return nil
 }
 
-func (d *fakeDNS) Wait(_ context.Context, records map[string][]string, _ time.Duration) error {
+func (d *fakeDNS) Wait(ctx context.Context, records map[string][]string, _ time.Duration) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.log = append(d.log, fmt.Sprint("wait ", len(records)))
+	if d.wait != nil {
+		return d.wait(ctx)
+	}
 	return nil
 }
 
@@ -272,13 +310,17 @@ func (d *fakeDNS) lookup(name string) []string {
 func setup(t *testing.T, accept bool) (*Issuer, *fakeCA, *fakeDNS) {
 	d := &fakeDNS{txt: map[string][]string{}}
 	ca := newCA(t, d)
+	return issuerForCA(t, ca, d, accept), ca, d
+}
+
+func issuerForCA(t *testing.T, ca *fakeCA, d *fakeDNS, accept bool) *Issuer {
 	i := &Issuer{
-		ACME:      config.ACME{Directory: ca.url("/dir"), AccountKeyFile: filepath.Join(t.TempDir(), "account.key"), AcceptTerms: accept, CreateAccount: true},
+		ACME:      config.ACME{Directory: ca.url("/dir"), AccountKeyFile: filepath.Join(testutil.StateDir(t), "account.key"), AcceptTerms: accept, CreateAccount: true},
 		DNS:       d,
 		DNSConfig: config.DNS{PropagationTimeout: "1s"},
 		Log:       slog.New(slog.DiscardHandler),
 	}
-	return i, ca, d
+	return i
 }
 
 var hosts = []string{"*.uchi.example.org", "uchi.example.org", "cv.example.org"}
@@ -305,7 +347,7 @@ func TestIssue(t *testing.T) {
 	i, ca, d := setup(t, true)
 	var log1, log2 bytes.Buffer
 	i.Log = slog.New(slog.NewJSONHandler(&log1, nil))
-	chain, key, err := i.Issue(context.Background(), hosts)
+	chain, key, err := issue(t, i, context.Background(), hosts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -341,7 +383,7 @@ func TestIssue(t *testing.T) {
 	j.ACME, j.DNS = i.ACME, d
 	j.ACME.AcceptTerms, j.ACME.CreateAccount = false, false
 	j.Log = slog.New(slog.NewJSONHandler(&log2, nil))
-	_, key2, err := j.Issue(context.Background(), hosts[:1])
+	_, key2, err := issue(t, j, context.Background(), hosts[:1])
 	if err != nil || slices.Equal(key, key2) || len(ca.accounts) != 1 {
 		t.Fatalf("second issue: %v, accounts %d", err, len(ca.accounts))
 	}
@@ -362,7 +404,7 @@ func TestIssue(t *testing.T) {
 
 func TestTermsNotAccepted(t *testing.T) {
 	i, ca, _ := setup(t, false)
-	if _, _, err := i.Issue(context.Background(), hosts); err == nil || !strings.Contains(err.Error(), "accept_terms") {
+	if _, _, err := issue(t, i, context.Background(), hosts); err == nil || !strings.Contains(err.Error(), "accept_terms") {
 		t.Fatalf("want an accept_terms error, got %v", err)
 	}
 	if len(ca.accounts) != 0 {
@@ -375,7 +417,7 @@ func TestTermsNotAccepted(t *testing.T) {
 // accounturi pin would reject.
 func TestMissingAccountKeyRefused(t *testing.T) {
 	i, ca, _ := setup(t, true)
-	if _, _, err := i.Issue(context.Background(), hosts); err != nil {
+	if _, _, err := issue(t, i, context.Background(), hosts); err != nil {
 		t.Fatal(err)
 	}
 	// The key lost or hidden by a mount, later, on a host where create_account is off.
@@ -386,7 +428,7 @@ func TestMissingAccountKeyRefused(t *testing.T) {
 	var out bytes.Buffer
 	j.Log = logging.New(&out, slog.LevelInfo)
 	requests := ca.nonce
-	if _, _, err := j.Issue(context.Background(), hosts); !errors.Is(err, ErrAccountKeyMissing) {
+	if _, _, err := issue(t, j, context.Background(), hosts); !errors.Is(err, ErrAccountKeyMissing) {
 		t.Fatalf("want ErrAccountKeyMissing, got %v", err)
 	}
 	if ca.nonce != requests || len(ca.accounts) != 1 || len(d.log) != 0 {
@@ -402,9 +444,14 @@ func TestMissingAccountKeyRefused(t *testing.T) {
 
 // A failure while staging any file of a pair replaces none of them, and leaves no temporary file.
 func TestWriteFilesReplacesNothingOnFailure(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.StateDir(t)
+	root, err := state.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
 	os.WriteFile(filepath.Join(dir, "a.pem"), []byte("old"), 0o640)
-	if err := WriteFiles(dir, 0o640, File{"a.pem", []byte("new")}, File{"no/such.pem", nil}); err == nil {
+	if err := state.WriteFiles(root, 0o640, state.File{Name: "a.pem", Data: []byte("new")}, state.File{Name: "no/such.pem"}); err == nil {
 		t.Fatal("want an error")
 	}
 	if got, _ := os.ReadFile(filepath.Join(dir, "a.pem")); string(got) != "old" {
@@ -418,7 +465,7 @@ func TestWriteFilesReplacesNothingOnFailure(t *testing.T) {
 func TestFailedUpdateAbortsAndCleansUp(t *testing.T) {
 	i, ca, d := setup(t, true)
 	d.failAdd = 2
-	if _, _, err := i.Issue(context.Background(), hosts); err == nil {
+	if _, _, err := issue(t, i, context.Background(), hosts); err == nil {
 		t.Fatal("want an error")
 	}
 	want := []string{"add _acme-challenge.uchi.example.org.", "add _acme-challenge.uchi.example.org.",
@@ -458,4 +505,14 @@ func TestDue(t *testing.T) {
 			t.Errorf("%s: got %q, want %q", name, got, tc.want)
 		}
 	}
+}
+
+func issue(t *testing.T, i *Issuer, ctx context.Context, hosts []string) ([]byte, []byte, error) {
+	t.Helper()
+	root, err := state.Open(filepath.Dir(i.ACME.AccountKeyFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	return i.Issue(ctx, root, hosts)
 }

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/miekg/dns"
@@ -23,11 +24,12 @@ type fakeNS struct {
 
 	mu       sync.Mutex
 	txt      map[string][]string
-	refuse   bool     // answer a signed REFUSED to every UPDATE
-	lag      int      // TXT queries answered empty before the records show
-	truncate bool     // answer UPDATEs over UDP with a signed, truncated, unapplied reply
-	forge    string   // answer UPDATEs with this kind of bad reply, see forged
-	updates  []string // transport of every UPDATE received
+	refuse   bool                     // answer a signed REFUSED to every UPDATE
+	lag      int                      // TXT queries answered empty before the records show
+	truncate bool                     // answer UPDATEs over UDP with a signed, truncated, unapplied reply
+	forge    string                   // answer UPDATEs with this kind of bad reply, see forged
+	query    func(*dns.Msg, *dns.Msg) // optional response mutation, under mu
+	updates  []string                 // transport of every UPDATE received
 }
 
 func startNS(t *testing.T) *fakeNS {
@@ -63,6 +65,7 @@ func (f *fakeNS) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	m := new(dns.Msg).SetReply(r)
+	m.Authoritative = true
 	q := r.Question[0]
 	switch {
 	case r.Opcode == dns.OpcodeUpdate:
@@ -94,6 +97,9 @@ func (f *fakeNS) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		for _, v := range f.txt[q.Name] {
 			m.Answer = append(m.Answer, &dns.TXT{Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 60}, Txt: []string{v}})
 		}
+	}
+	if f.query != nil && r.Opcode == dns.OpcodeQuery {
+		f.query(r, m)
 	}
 	w.WriteMsg(m)
 }
@@ -200,7 +206,9 @@ func TestAddDeleteFanOut(t *testing.T) {
 
 func TestAddAbortsOnRefusal(t *testing.T) {
 	a, b := startNS(t), startNS(t)
+	a.mu.Lock()
 	a.refuse = true
+	a.mu.Unlock()
 	err := client(t, a, b).Add(context.Background(), name, "v")
 	if err == nil || !strings.Contains(err.Error(), "REFUSED") {
 		t.Fatalf("want REFUSED, got %v", err)
@@ -216,7 +224,9 @@ func TestDeleteReportsEveryFailure(t *testing.T) {
 	if err := c.Add(context.Background(), name, "v"); err != nil {
 		t.Fatal(err)
 	}
+	a.mu.Lock()
 	a.refuse = true
+	a.mu.Unlock()
 	if err := c.Delete(context.Background(), name, "v"); err == nil {
 		t.Fatal("want an error from the refusing nameserver")
 	}
@@ -240,7 +250,9 @@ func TestUpdateRejectsUnauthenticatedReplies(t *testing.T) {
 	for _, forge := range []string{"unsigned success", "unsigned refusal", "empty mac", "wrong mac", "expired", "wrong key name", "tsig error", "signed refusal", "query opcode"} {
 		t.Run(forge, func(t *testing.T) {
 			a := startNS(t)
+			a.mu.Lock()
 			a.forge = forge
+			a.mu.Unlock()
 			if err := client(t, a).Add(context.Background(), name, "v"); err == nil {
 				t.Fatal("reply accepted")
 			}
@@ -251,7 +263,9 @@ func TestUpdateRejectsUnauthenticatedReplies(t *testing.T) {
 // H2 of the 6959360 review: a truncated UDP reply makes the client retry over TCP, signed again.
 func TestTruncatedUpdateRetriesSignedOverTCP(t *testing.T) {
 	a := startNS(t)
+	a.mu.Lock()
 	a.truncate = true
+	a.mu.Unlock()
 	c := client(t, a)
 	if err := c.Add(context.Background(), name, "v"); err != nil {
 		t.Fatal(err)
@@ -273,15 +287,40 @@ func TestWaitLaggingNameserver(t *testing.T) {
 	if err := c.Add(context.Background(), name, "v"); err != nil {
 		t.Fatal(err)
 	}
+	b.mu.Lock()
 	b.lag = 3
+	b.mu.Unlock()
 	if err := c.Wait(context.Background(), map[string][]string{name: {"v"}}, 5*time.Second); err != nil {
 		t.Fatal(err)
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b.mu.Lock()
 	b.lag = 1 << 30
-	err := c.Wait(context.Background(), map[string][]string{name: {"v"}}, 100*time.Millisecond)
+	// Cancel after a has answered, so a deadline cannot interrupt its final query.
+	b.query = func(_, _ *dns.Msg) { cancel() }
+	b.mu.Unlock()
+	c.Interval = time.Hour
+	err := c.Wait(ctx, map[string][]string{name: {"v"}}, time.Hour)
 	if err == nil || !strings.Contains(err.Error(), b.addr) || strings.Contains(err.Error(), a.addr) {
-		t.Fatalf("want a timeout naming only %s, got %v", b.addr, err)
+		t.Fatalf("want only lagging nameserver %s, got %v", b.addr, err)
 	}
+}
+
+func TestWaitTimeout(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		// A malformed address fails before opening a socket; synctest controls the deadline.
+		c := &Client{Nameservers: []string{"missing-port"}, Interval: 10 * time.Millisecond}
+		const timeout = 100 * time.Millisecond
+		start := time.Now()
+		err := c.Wait(context.Background(), map[string][]string{name: {"v"}}, timeout)
+		if err == nil || err.Error() != "challenge records not visible after 100ms on missing-port" {
+			t.Fatalf("want propagation timeout, got %v", err)
+		}
+		if elapsed := time.Since(start); elapsed != timeout {
+			t.Fatalf("waited %s, want %s", elapsed, timeout)
+		}
+	})
 }
 
 func TestKeyFile(t *testing.T) {
@@ -290,5 +329,141 @@ func TestKeyFile(t *testing.T) {
 	_, err := New(nil, key)
 	if err == nil || strings.Contains(err.Error(), "%%%") {
 		t.Fatalf("want an error without the secret, got %v", err)
+	}
+}
+
+func TestTSIGNameAndSingleLine(t *testing.T) {
+	key := filepath.Join(t.TempDir(), "key")
+	for _, bad := range []string{
+		"hanko..example:" + secret, ".:" + secret, "a b:" + secret,
+		"hanko:" + secret + "\nsecond:" + secret, "hanko:" + secret[:10] + "\n" + secret[10:],
+		"\nhanko:" + secret, "hanko:" + secret + "\n\n",
+	} {
+		if err := os.WriteFile(key, []byte(bad), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := New(nil, key); err == nil || strings.Contains(err.Error(), secret) {
+			t.Fatalf("unsafe TSIG input: %v", err)
+		}
+	}
+	if err := os.WriteFile(key, []byte("HaNkO.Example.:"+secret+"\r\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := New(nil, key)
+	if err != nil || c.KeyName != "hanko.example." {
+		t.Fatalf("canonical key %+v: %v", c, err)
+	}
+	// sops may expose its secret through a symlink; state no-follow checks do not apply here.
+	link := filepath.Join(t.TempDir(), "sops")
+	os.Symlink(key, link)
+	if _, err := New(nil, link); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestQueryResponseSemantics(t *testing.T) {
+	for _, typ := range []uint16{dns.TypeSOA, dns.TypeTXT} {
+		for _, bad := range []string{"rcode", "authority", "opcode", "question name", "question type", "question class", "missing question", "owner", "class", "section", "value"} {
+			if typ == dns.TypeSOA && (bad == "section" || bad == "value") {
+				continue
+			}
+			t.Run(dns.TypeToString[typ]+"/"+bad, func(t *testing.T) {
+				ns := startNS(t)
+				ns.mu.Lock()
+				ns.txt[name] = []string{"expected"}
+				ns.query = func(q, r *dns.Msg) {
+					if q.Question[0].Qtype != typ {
+						return
+					}
+					var rr dns.RR
+					if typ == dns.TypeSOA {
+						rr = r.Ns[0]
+					} else {
+						rr = r.Answer[0]
+					}
+					switch bad {
+					case "rcode":
+						r.Rcode = dns.RcodeServerFailure
+					case "authority":
+						r.Authoritative = false
+					case "opcode":
+						r.Opcode = dns.OpcodeStatus
+					case "question name":
+						r.Question[0].Name = "other.example.org."
+					case "question type":
+						r.Question[0].Qtype = dns.TypeA
+					case "question class":
+						r.Question[0].Qclass = dns.ClassCHAOS
+					case "missing question":
+						r.Question = nil
+					case "owner":
+						rr.Header().Name = "unrelated.org."
+					case "class":
+						rr.Header().Class = dns.ClassCHAOS
+					case "section":
+						r.Ns, r.Answer = r.Answer, nil
+					case "value":
+						rr.(*dns.TXT).Txt = []string{"wrong"}
+					}
+				}
+				ns.mu.Unlock()
+				c := client(t, ns)
+				if typ == dns.TypeSOA {
+					if _, err := c.zone(context.Background(), ns.addr, name); err == nil {
+						t.Fatal("invalid SOA accepted")
+					}
+				} else if c.has(context.Background(), ns.addr, map[string][]string{name: {"expected"}}) {
+					t.Fatal("invalid TXT accepted")
+				}
+			})
+		}
+	}
+}
+
+func TestAuthoritativeNegativeSOAAndSplitTXT(t *testing.T) {
+	ns := startNS(t)
+	ns.mu.Lock()
+	ns.txt[name] = []string{"expected"}
+	ns.query = func(q, r *dns.Msg) {
+		if q.Question[0].Qtype == dns.TypeSOA {
+			r.Rcode = dns.RcodeNameError
+		} else {
+			txt := r.Answer[0].(*dns.TXT)
+			txt.Hdr.Name = strings.ToUpper(name)
+			txt.Txt = []string{"ex", "pected"}
+		}
+	}
+	ns.mu.Unlock()
+	c := client(t, ns)
+	if zone, err := c.zone(context.Background(), ns.addr, name); err != nil || zone != "example.org." {
+		t.Fatalf("zone %s: %v", zone, err)
+	}
+	if !c.has(context.Background(), ns.addr, map[string][]string{name: {"expected"}}) {
+		t.Fatal("split TXT rejected")
+	}
+}
+
+func TestWaitRechecksEveryAuthority(t *testing.T) {
+	a, b := startNS(t), startNS(t)
+	c := client(t, a, b)
+	if err := c.Add(context.Background(), name, "v"); err != nil {
+		t.Fatal(err)
+	}
+	a.mu.Lock()
+	queries := 0
+	a.query = func(q, r *dns.Msg) {
+		if q.Question[0].Qtype == dns.TypeTXT {
+			queries++
+			if queries > 1 {
+				r.Answer = nil
+			}
+		}
+	}
+	a.mu.Unlock()
+	b.mu.Lock()
+	b.lag = 1
+	b.mu.Unlock()
+	if err := c.Wait(context.Background(), map[string][]string{name: {"v"}}, 100*time.Millisecond); err == nil {
+		t.Fatal("accepted a stale successful observation")
 	}
 }

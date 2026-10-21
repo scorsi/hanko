@@ -11,4 +11,6 @@ MADR-lite, as in annai: one decision per file, `NNNN-slug.md`, sections Context 
 | [0005](0005-identity-and-permissions.md) | Service identity, file permissions and hardening |
 | [0006](0006-state-directory-traversal.md) | The state directory is traversable by consumers |
 | [0007](0007-observability.md) | Observability: schema v1 logs, no metrics endpoint yet |
-| [0008](0008-account-key-continuity.md) | The account key is created on request only (proposed) |
+| [0008](0008-account-key-continuity.md) | The account key is created on request only (Accepted — 2026-10-21) |
+| [0009](0009-state-and-delivery-safety.md) | Verify state and persist delivery failures |
+| [0010](0010-acme-retry-deadlines.md) | Persist CA retry deadlines across oneshots |

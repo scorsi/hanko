@@ -1,6 +1,6 @@
 # ADR-0008: The account key is created on request only
 
-- Status: proposed
+- Status: Accepted — 2026-10-21
 - Date: 2026-10-21
 
 ## Context
@@ -27,7 +27,7 @@ ADR-0003 has hanko create its ACME account key "on first run", and says losing i
 
 ## Consequences
 
-- Supersedes, once accepted, ADR-0003's "key created by hanko on first run" and its consequence "losing it costs a new account, nothing else", and adds a key to ADR-0002's `[acme]` table.
+- Supersedes ADR-0003's "key created by hanko on first run" and its consequence "losing it costs a new account, nothing else", and adds a key to ADR-0002's `[acme]` table.
 - A fresh host needs `createAccount = true` for its first run; the M1 `nixosTest` sets it, and proves that without it a missing key fails with `account-key-missing` and is not recreated.
 - A host already in service has its key: it needs no change. If the key is really lost, the owner sets `create_account`, updates the CAA `accounturi=` to the new URL, then unsets it.
 - The key is a secret worth a backup now: losing it means a CAA change, not just a new account.

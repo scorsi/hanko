@@ -31,12 +31,14 @@ func New(nameservers []string, keyFile string) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	name, secret, ok := strings.Cut(strings.TrimSpace(string(data)), ":")
-	if _, err := base64.StdEncoding.DecodeString(secret); !ok || name == "" || secret == "" || err != nil {
+	line := strings.TrimSuffix(strings.TrimSuffix(string(data), "\r\n"), "\n")
+	name, secret, ok := strings.Cut(line, ":")
+	_, validName := dns.IsDomainName(name)
+	if _, err := base64.StdEncoding.DecodeString(secret); !ok || !validName || name == "" || name == "." || strings.ContainsAny(line, "\r\n \t\\") || secret == "" || err != nil {
 		// Never print the content: it is a secret (ADR 0005).
 		return nil, fmt.Errorf("tsig key %s: want one line <name>:<base64 secret>", keyFile)
 	}
-	return &Client{Nameservers: nameservers, KeyName: dns.Fqdn(name), Secret: secret, Interval: 2 * time.Second}, nil
+	return &Client{Nameservers: nameservers, KeyName: dns.CanonicalName(name), Secret: secret, Interval: 2 * time.Second}, nil
 }
 
 // Add places the TXT record on every nameserver; the first refused or failed UPDATE aborts,
@@ -112,8 +114,11 @@ func (c *Client) zone(ctx context.Context, ns, name string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("zone of %s on %s: %w", name, ns, err)
 	}
+	if !answerTo(m, r) || !r.Authoritative || (r.Rcode != dns.RcodeSuccess && r.Rcode != dns.RcodeNameError) {
+		return "", fmt.Errorf("zone of %s on %s: not an authoritative SOA response", name, ns)
+	}
 	for _, rr := range append(r.Answer, r.Ns...) {
-		if soa, ok := rr.(*dns.SOA); ok {
+		if soa, ok := rr.(*dns.SOA); ok && soa.Hdr.Class == dns.ClassINET && dns.IsSubDomain(soa.Hdr.Name, name) {
 			return soa.Hdr.Name, nil
 		}
 	}
@@ -138,9 +143,13 @@ func (c *Client) exchange(ctx context.Context, m *dns.Msg, ns string) (*dns.Msg,
 func (c *Client) Wait(ctx context.Context, records map[string][]string, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	pending := slices.Clone(c.Nameservers)
 	for {
-		pending = slices.DeleteFunc(pending, func(ns string) bool { return c.has(ctx, ns, records) })
+		var pending []string
+		for _, ns := range c.Nameservers {
+			if !c.has(ctx, ns, records) {
+				pending = append(pending, ns)
+			}
+		}
 		if len(pending) == 0 {
 			return nil
 		}
@@ -157,12 +166,12 @@ func (c *Client) has(ctx context.Context, ns string, records map[string][]string
 		m := new(dns.Msg).SetQuestion(dns.Fqdn(name), dns.TypeTXT)
 		m.RecursionDesired = false
 		r, err := c.exchange(ctx, m, ns)
-		if err != nil {
+		if err != nil || !answerTo(m, r) || !r.Authoritative || r.Rcode != dns.RcodeSuccess {
 			return false
 		}
 		var got []string
 		for _, rr := range r.Answer {
-			if txt, ok := rr.(*dns.TXT); ok {
+			if txt, ok := rr.(*dns.TXT); ok && txt.Hdr.Class == dns.ClassINET && strings.EqualFold(txt.Hdr.Name, m.Question[0].Name) {
 				got = append(got, strings.Join(txt.Txt, ""))
 			}
 		}
@@ -173,4 +182,13 @@ func (c *Client) has(ctx context.Context, ns string, records map[string][]string
 		}
 	}
 	return true
+}
+
+// The transport checks IDs, but a successful exchange alone says nothing about DNS semantics.
+func answerTo(q, r *dns.Msg) bool {
+	if r == nil || !r.Response || r.Truncated || r.Id != q.Id || r.Opcode != dns.OpcodeQuery || len(r.Question) != 1 {
+		return false
+	}
+	a, b := q.Question[0], r.Question[0]
+	return a.Qtype == b.Qtype && a.Qclass == b.Qclass && strings.EqualFold(a.Name, b.Name)
 }

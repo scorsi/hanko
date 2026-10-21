@@ -10,18 +10,21 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math/big"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/scorsi/hanko/internal/config"
 	"github.com/scorsi/hanko/internal/logging"
+	"github.com/scorsi/hanko/internal/testutil"
 )
 
 // stubIssuer self-signs 90-day certificates, or fails for the hosts in fail.
@@ -32,7 +35,7 @@ type stubIssuer struct {
 	hold  func() // called inside Issue when set
 }
 
-func (s *stubIssuer) Issue(_ context.Context, hosts []string) ([]byte, []byte, error) {
+func (s *stubIssuer) Issue(_ context.Context, _ *os.Root, hosts []string) ([]byte, []byte, error) {
 	if s.hold != nil {
 		s.hold()
 	}
@@ -49,16 +52,18 @@ func (s *stubIssuer) Issue(_ context.Context, hosts []string) ([]byte, []byte, e
 }
 
 func setup(t *testing.T) (*Runner, *stubIssuer, *[]string) {
-	state := t.TempDir()
+	state := testutil.StateDir(t)
 	for _, n := range []string{"home", "cv"} {
-		// As the module provisions them (ADR 0005), less the setgid bit, which the macOS build
-		// sandbox drops.
+		// As the module provisions them (ADR 0005).
 		dir := filepath.Join(state, n)
 		if err := os.Mkdir(dir, 0o750); err != nil {
 			t.Fatal(err)
 		}
-		if err := checkDir(dir); err != nil {
+		if err := os.Chmod(dir, os.ModeSetgid|0o750); err != nil {
 			t.Fatal(err)
+		}
+		if info, _ := os.Stat(dir); info.Mode()&os.ModeSetgid == 0 {
+			t.Skip("filesystem drops setgid; run directory tests on Linux")
 		}
 	}
 	iss := &stubIssuer{}
@@ -72,12 +77,12 @@ func setup(t *testing.T) (*Runner, *stubIssuer, *[]string) {
 			t.Errorf("reload of %s before the files were in place: %v", unit, err)
 		}
 		reloads = append(reloads, unit)
-		return errors.New("reload errors are logged only")
+		return nil
 	}
 	return r, iss, &reloads
 }
 
-var home = config.Certificate{Name: "home", Issuer: "acme", Hosts: []string{"*.uchi.example.org", "uchi.example.org"}, Reload: []string{"genkan.service", "other.service"}}
+var home = config.Certificate{Name: "home", Group: strconv.Itoa(os.Getegid()), Issuer: "acme", Hosts: []string{"*.uchi.example.org", "uchi.example.org"}, Reload: []string{"genkan.service", "other.service"}}
 
 func TestRunWritesThenReloads(t *testing.T) {
 	r, iss, reloads := setup(t)
@@ -130,7 +135,7 @@ func TestRunRenewsMismatchedPair(t *testing.T) {
 	dir := filepath.Join(r.StateDir, "home")
 	for _, bad := range [][]byte{nil, []byte("garbage")} {
 		// The interrupted run: a fresh certificate for the same hosts renamed in, the key not.
-		chain, _, _ := (&stubIssuer{}).Issue(context.Background(), home.Hosts)
+		chain, _, _ := (&stubIssuer{}).Issue(context.Background(), nil, home.Hosts)
 		os.WriteFile(filepath.Join(dir, "fullchain.pem"), chain, 0o640)
 		if bad != nil {
 			os.WriteFile(filepath.Join(dir, "key.pem"), bad, 0o640) // or a corrupt key
@@ -172,7 +177,7 @@ func TestRunChecksDirectoryBeforeOrdering(t *testing.T) {
 func TestRunFailureKeepsGoing(t *testing.T) {
 	r, iss, reloads := setup(t)
 	iss.fail = "cv.example.org"
-	cv := config.Certificate{Name: "cv", Issuer: "acme", Hosts: []string{"cv.example.org"}, Reload: []string{"cv.service"}}
+	cv := config.Certificate{Name: "cv", Group: strconv.Itoa(os.Getegid()), Issuer: "acme", Hosts: []string{"cv.example.org"}, Reload: []string{"cv.service"}}
 	err := r.Run(context.Background(), []config.Certificate{cv, home})
 	if err == nil || !strings.Contains(err.Error(), "cv:") || strings.Contains(err.Error(), "home") {
 		t.Fatalf("want an error naming cv only, got %v", err)
@@ -215,9 +220,7 @@ func TestConcurrentRunWaitsThenRenewsNothing(t *testing.T) {
 	}
 }
 
-// TestMain doubles as a fake systemctl: Systemctl's tests put a "systemctl" symlink to this
-// binary first in PATH. It logs its arguments; FAKE_ACTIVE=1 makes is-active succeed,
-// FAKE_RELOAD=1 makes reload succeed; restart always succeeds.
+// TestMain doubles as systemctl so command/transport failures are tested without systemd.
 func TestMain(m *testing.M) {
 	if filepath.Base(os.Args[0]) != "systemctl" {
 		os.Exit(m.Run())
@@ -225,9 +228,13 @@ func TestMain(m *testing.M) {
 	f, _ := os.OpenFile(os.Getenv("FAKE_LOG"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	f.WriteString(strings.Join(os.Args[1:], " ") + "\n")
 	f.Close()
-	if slices.Contains(os.Args, "is-active") && os.Getenv("FAKE_ACTIVE") != "1" ||
-		slices.Contains(os.Args, "reload") && os.Getenv("FAKE_RELOAD") != "1" {
-		os.Exit(3)
+	if slices.Contains(os.Args, "show") {
+		if os.Getenv("FAKE_SHOW_FAIL") == "1" {
+			os.Exit(1)
+		}
+		fmt.Print(os.Getenv("FAKE_PROPERTIES"))
+	} else if os.Getenv("FAKE_ACTION_FAIL") == "1" {
+		os.Exit(1)
 	}
 	os.Exit(0)
 }
@@ -243,24 +250,55 @@ func TestSystemctl(t *testing.T) {
 	}
 	t.Setenv("PATH", bin)
 	for _, tc := range []struct {
-		active, reload string
-		err            error
-		calls          string
+		name, props, action                  string
+		showFail, actionFail, fail, inactive bool
 	}{
-		{"0", "1", ErrInactive, "is-active --quiet c.service\n"},
-		{"1", "1", nil, "is-active --quiet c.service\n--no-ask-password reload c.service\n"},
-		{"1", "0", nil, "is-active --quiet c.service\n--no-ask-password reload c.service\n--no-ask-password restart c.service\n"},
+		{name: "inactive", props: "LoadState=loaded\nActiveState=inactive\nCanReload=yes\n", inactive: true},
+		{name: "activating", props: "LoadState=loaded\nActiveState=activating\nCanReload=yes\n", inactive: true},
+		{name: "reload", props: "LoadState=loaded\nActiveState=active\nCanReload=yes\n", action: "reload"},
+		{name: "no reload support", props: "LoadState=loaded\nActiveState=active\nCanReload=no\n", action: "restart"},
+		{name: "reload failure never restarts", props: "LoadState=loaded\nActiveState=active\nCanReload=yes\n", action: "reload", actionFail: true, fail: true},
+		{name: "restart failure", props: "LoadState=loaded\nActiveState=active\nCanReload=no\n", action: "restart", actionFail: true, fail: true},
+		{name: "bus failure", showFail: true, fail: true},
+		{name: "missing unit", props: "LoadState=not-found\nActiveState=inactive\nCanReload=no\n", fail: true},
+		{name: "malformed properties", props: "LoadState=loaded\nActiveState=active\n", fail: true},
 	} {
-		log := filepath.Join(t.TempDir(), "calls")
-		t.Setenv("FAKE_LOG", log)
-		t.Setenv("FAKE_ACTIVE", tc.active)
-		t.Setenv("FAKE_RELOAD", tc.reload)
-		err := Systemctl(context.Background(), "c.service")
-		calls, _ := os.ReadFile(log)
-		if !errors.Is(err, tc.err) || string(calls) != tc.calls {
-			t.Errorf("active %s reload %s: err %v, calls %q", tc.active, tc.reload, err, calls)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			log := filepath.Join(t.TempDir(), "calls")
+			t.Setenv("FAKE_LOG", log)
+			t.Setenv("FAKE_PROPERTIES", tc.props)
+			t.Setenv("FAKE_SHOW_FAIL", "0")
+			if tc.showFail {
+				t.Setenv("FAKE_SHOW_FAIL", "1")
+			}
+			t.Setenv("FAKE_ACTION_FAIL", "0")
+			if tc.actionFail {
+				t.Setenv("FAKE_ACTION_FAIL", "1")
+			}
+			err := Systemctl(context.Background(), "c.service")
+			calls, _ := os.ReadFile(log)
+			want := "show --property=LoadState,ActiveState,CanReload -- c.service\n"
+			if tc.action != "" {
+				want += "--no-ask-password " + tc.action + " -- c.service\n"
+			}
+			if (err != nil) != (tc.fail || tc.inactive) || errors.Is(err, ErrInactive) != tc.inactive || string(calls) != want {
+				t.Fatalf("err %v, calls %q, want %q", err, calls, want)
+			}
+		})
 	}
+	t.Run("missing executable", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir())
+		if err := Systemctl(context.Background(), "c.service"); err == nil || errors.Is(err, ErrInactive) {
+			t.Fatalf("err %v", err)
+		}
+	})
+	t.Run("cancelled context", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := Systemctl(ctx, "c.service"); err == nil || errors.Is(err, ErrInactive) {
+			t.Fatalf("err %v", err)
+		}
+	})
 }
 
 func TestRunSkipsInactiveUnits(t *testing.T) {
@@ -300,5 +338,130 @@ func TestRunLogsLockFailure(t *testing.T) {
 	}
 	if s := out.String(); !strings.Contains(s, `"level":"error","v":1,"event":"run-failed","err":`) {
 		t.Fatalf("log:\n%s", s)
+	}
+}
+
+func TestRunRetriesFailedReloadWithoutIssuing(t *testing.T) {
+	r, iss, _ := setup(t)
+	var out bytes.Buffer
+	r.Log = logging.New(&out, slog.LevelInfo)
+	r.Reload = func(ctx context.Context, _ string) error {
+		deadline, ok := ctx.Deadline()
+		if !ok || time.Until(deadline) > time.Minute || time.Until(deadline) < 50*time.Second {
+			t.Errorf("reload deadline %v", deadline)
+		}
+		return errors.New("reload rejected")
+	}
+	if err := r.Run(context.Background(), []config.Certificate{home}); err == nil {
+		t.Fatal("delivery failure reported success")
+	}
+	if !strings.Contains(out.String(), `"renewed":1,"failed":1`) {
+		t.Fatalf("summary %s", &out)
+	}
+	marker := filepath.Join(r.StateDir, "home", ".reload-pending")
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatal(err)
+	}
+	next := *r
+	calls := 0
+	next.Reload = func(context.Context, string) error { calls++; return nil }
+	if err := next.Run(context.Background(), []config.Certificate{home}); err != nil {
+		t.Fatal(err)
+	}
+	if iss.calls != 1 || calls != len(home.Reload) {
+		t.Fatalf("orders %d, reloads %d", iss.calls, calls)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("marker not cleared: %v", err)
+	}
+	// Crash after installing files and before reload: recover the durable intent next run.
+	if err := os.WriteFile(marker, []byte("pending\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := next.Run(context.Background(), []config.Certificate{home}); err != nil {
+		t.Fatal(err)
+	}
+	if iss.calls != 1 || calls != 2*len(home.Reload) {
+		t.Fatalf("crash recovery: orders %d, reloads %d", iss.calls, calls)
+	}
+}
+
+func TestRunChecksExistingState(t *testing.T) {
+	for _, kind := range []string{"certificate symlink", "state symlink", "lock symlink", "key symlink", "key permissions", "missing setgid", "wrong group", "state writable"} {
+		t.Run(kind, func(t *testing.T) {
+			r, iss, _ := setup(t)
+			if err := r.Run(context.Background(), []config.Certificate{home}); err != nil {
+				t.Fatal(err)
+			}
+			c := home
+			dir := filepath.Join(r.StateDir, c.Name)
+			key := filepath.Join(dir, "key.pem")
+			outside := t.TempDir()
+			switch kind {
+			case "certificate symlink":
+				os.Rename(dir, dir+"-old")
+				os.Symlink(outside, dir)
+			case "state symlink":
+				os.Rename(r.StateDir, r.StateDir+"-old")
+				t.Cleanup(func() { os.RemoveAll(r.StateDir + "-old") })
+				os.Symlink(outside, r.StateDir)
+			case "lock symlink":
+				os.Remove(filepath.Join(r.StateDir, ".lock"))
+				os.Symlink(filepath.Join(outside, "lock"), filepath.Join(r.StateDir, ".lock"))
+			case "key symlink":
+				os.Rename(key, filepath.Join(outside, "key"))
+				os.Symlink(filepath.Join(outside, "key"), key)
+			case "key permissions":
+				os.Chmod(key, 0o644)
+			case "missing setgid":
+				os.Chmod(dir, 0o750)
+			case "wrong group":
+				c.Group = strconv.Itoa(os.Getegid() + 1)
+			case "state writable":
+				os.Chmod(r.StateDir, 0o777)
+			}
+			if err := r.Run(context.Background(), []config.Certificate{c}); err == nil {
+				t.Fatal("unsafe existing state accepted")
+			}
+			if iss.calls != 1 {
+				t.Fatalf("unexpected order: %d", iss.calls)
+			}
+		})
+	}
+}
+
+// This delivery-only check also runs on filesystems that cannot retain setgid.
+func TestReloadFailurePreservesIntent(t *testing.T) {
+	root, err := os.OpenRoot(testutil.StateDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	root.WriteFile(".reload-pending", []byte("pending"), 0o600)
+	r := &Runner{Log: slog.New(slog.DiscardHandler)}
+	calls := 0
+	r.Reload = func(ctx context.Context, unit string) error {
+		calls++
+		deadline, ok := ctx.Deadline()
+		if !ok || time.Until(deadline) < 50*time.Second || time.Until(deadline) > time.Minute {
+			t.Errorf("reload budget: %v", deadline)
+		}
+		return errors.New("rejected")
+	}
+	if err := r.reload(context.Background(), root, home); err == nil {
+		t.Fatal("reload failure disappeared")
+	}
+	if calls != len(home.Reload) {
+		t.Fatal("did not try every consumer")
+	}
+	if _, err := root.Stat(".reload-pending"); err != nil {
+		t.Fatal("lost pending intent")
+	}
+	r.Reload = func(context.Context, string) error { return nil }
+	if err := r.reload(context.Background(), root, home); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := root.Stat(".reload-pending"); !os.IsNotExist(err) {
+		t.Fatalf("intent not cleared: %v", err)
 	}
 }

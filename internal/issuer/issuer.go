@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/scorsi/hanko/internal/config"
 	"github.com/scorsi/hanko/internal/rfc2136"
+	"github.com/scorsi/hanko/internal/state"
 )
 
 // DNS places challenge records; *rfc2136.Client in production.
@@ -41,7 +43,8 @@ type Issuer struct {
 	DNSConfig config.DNS
 	Log       *slog.Logger
 
-	client *acme.Client
+	client     *acme.Client
+	retryUntil time.Time
 }
 
 // Due returns why the certificate in chain (PEM, leaf first) must be renewed for hosts, or ""
@@ -91,7 +94,7 @@ func sameHosts(a, b []string) bool {
 	return slices.Equal(norm(a), norm(b))
 }
 
-func (i *Issuer) setup(ctx context.Context) error {
+func (i *Issuer) setup(ctx context.Context, root *os.Root) error {
 	if i.DNS == nil {
 		d, err := rfc2136.New(i.DNSConfig.Nameservers, i.DNSConfig.TSIGKeyFile)
 		if err != nil {
@@ -102,14 +105,20 @@ func (i *Issuer) setup(ctx context.Context) error {
 	if i.client != nil {
 		return nil
 	}
-	key, err := accountKey(i.ACME.AccountKeyFile, i.ACME.CreateAccount)
+	key, err := accountKey(root, filepath.Base(i.ACME.AccountKeyFile), i.ACME.CreateAccount)
 	if errors.Is(err, ErrAccountKeyMissing) {
 		i.Log.Error("", "event", "account-key-missing", "path", i.ACME.AccountKeyFile, "err", err)
 	}
 	if err != nil {
 		return err
 	}
-	c := &acme.Client{Key: key, DirectoryURL: i.ACME.Directory, UserAgent: "hanko"}
+	c := &acme.Client{Key: key, DirectoryURL: i.ACME.Directory, UserAgent: "hanko", RetryBackoff: func(n int, _ *http.Request, resp *http.Response) time.Duration {
+		// Only bad-nonce recovery is retried here; CA backoff survives the oneshot in .retry-after.
+		if resp.StatusCode == http.StatusBadRequest && n <= 3 {
+			return 100 * time.Millisecond
+		}
+		return 0
+	}}
 	acct, err := c.GetReg(ctx, "")
 	if errors.Is(err, acme.ErrNoAccount) {
 		if !i.ACME.AcceptTerms {
@@ -123,7 +132,7 @@ func (i *Issuer) setup(ctx context.Context) error {
 		}
 	}
 	if err != nil {
-		return fmt.Errorf("acme account: %w", err)
+		return i.failure(root, "account", err)
 	}
 	// Logged by every run that contacts the CA, for RFC 8657 accounturi= in CAA (ADR 0007).
 	i.Log.Info("", "event", "acme-account", "directory", i.ACME.Directory, "uri", acct.URI)
@@ -137,9 +146,12 @@ var ErrAccountKeyMissing = errors.New("account key absent; set acme.create_accou
 // accountKey loads the account key. An absent key is created, mode 0600, only when create is set:
 // otherwise a lost or hidden key would silently become a new account, which the CAA accounturi
 // pin rejects (ADR 0008).
-func accountKey(path string, create bool) (*ecdsa.PrivateKey, error) {
-	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
+func accountKey(root *os.Root, name string, create bool) (*ecdsa.PrivateKey, error) {
+	data, err := state.ReadOptional(root, name, 0o600, os.Getegid())
+	if err != nil {
+		return nil, err
+	}
+	if data == nil {
 		if !create {
 			return nil, ErrAccountKeyMissing
 		}
@@ -149,37 +161,40 @@ func accountKey(path string, create bool) (*ecdsa.PrivateKey, error) {
 		}
 		der, _ := x509.MarshalPKCS8PrivateKey(k)
 		// Synced, directory included, before the CA ever sees the key.
-		if err := WriteFiles(filepath.Dir(path), 0o600, File{filepath.Base(path), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})}); err != nil {
+		if err := state.WriteFiles(root, 0o600, state.File{Name: name, Data: pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})}); err != nil {
 			return nil, err
 		}
 		return k, nil
 	}
-	if err != nil {
-		return nil, err
-	}
 	b, _ := pem.Decode(data)
 	if b == nil {
-		return nil, fmt.Errorf("account key %s: no PEM block", path)
+		return nil, fmt.Errorf("account key %s: no PEM block", name)
 	}
 	k, err := x509.ParsePKCS8PrivateKey(b.Bytes)
 	if ec, ok := k.(*ecdsa.PrivateKey); err == nil && ok {
 		return ec, nil
 	}
-	return nil, fmt.Errorf("account key %s: want a PKCS#8 ECDSA key", path)
+	return nil, fmt.Errorf("account key %s: want a PKCS#8 ECDSA key", name)
 }
 
 type record struct{ name, value string }
 
 // Issue runs one order for hosts and returns the chain (leaf first) and a fresh P-256 key, both
 // PEM. Challenge records are removed on return, whatever happened.
-func (i *Issuer) Issue(ctx context.Context, hosts []string) (chain, key []byte, err error) {
-	if err := i.setup(ctx); err != nil {
+func (i *Issuer) Issue(ctx context.Context, root *os.Root, hosts []string) (chain, key []byte, err error) {
+	if filepath.Dir(i.ACME.AccountKeyFile) != root.Name() {
+		return nil, nil, errors.New("account key must be directly in the state directory")
+	}
+	if err := i.checkRetry(root); err != nil {
+		return nil, nil, err
+	}
+	if err := i.setup(ctx, root); err != nil {
 		return nil, nil, err
 	}
 	c := i.client
 	order, err := c.AuthorizeOrder(ctx, acme.DomainIDs(hosts...))
 	if err != nil {
-		return nil, nil, fmt.Errorf("new order: %w", err)
+		return nil, nil, i.failure(root, "new order", err)
 	}
 
 	var recs []record
@@ -188,14 +203,14 @@ func (i *Issuer) Issue(ctx context.Context, hosts []string) (chain, key []byte, 
 	for _, u := range order.AuthzURLs {
 		z, err := c.GetAuthorization(ctx, u)
 		if err != nil {
-			return nil, nil, fmt.Errorf("authorization: %w", err)
+			return nil, nil, i.failure(root, "authorization", err)
 		}
 		if z.Status == acme.StatusValid {
 			continue
 		}
 		n := slices.IndexFunc(z.Challenges, func(ch *acme.Challenge) bool { return ch.Type == "dns-01" })
 		if n < 0 {
-			return nil, nil, fmt.Errorf("authorization for %s offers no dns-01 challenge", z.Identifier.Value)
+			return nil, nil, errors.New("authorization offers no dns-01 challenge")
 		}
 		v, err := c.DNS01ChallengeRecord(z.Challenges[n].Token)
 		if err != nil {
@@ -233,16 +248,16 @@ func (i *Issuer) Issue(ctx context.Context, hosts []string) (chain, key []byte, 
 	}
 	for _, ch := range chals {
 		if _, err := c.Accept(ctx, ch); err != nil {
-			return nil, nil, fmt.Errorf("accept challenge: %w", err)
+			return nil, nil, i.failure(root, "accept challenge", err)
 		}
 	}
 	for _, u := range pending {
 		if _, err := c.WaitAuthorization(ctx, u); err != nil {
-			return nil, nil, fmt.Errorf("validation: %w", err)
+			return nil, nil, i.failure(root, "validation", err)
 		}
 	}
 	if order, err = c.WaitOrder(ctx, order.URI); err != nil {
-		return nil, nil, fmt.Errorf("order: %w", err)
+		return nil, nil, i.failure(root, "order", err)
 	}
 
 	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -255,11 +270,11 @@ func (i *Issuer) Issue(ctx context.Context, hosts []string) (chain, key []byte, 
 	}
 	der, _, err := c.CreateCertFromOrder(ctx, order, csr, true)
 	if err != nil {
-		return nil, nil, fmt.Errorf("finalize: %w", err)
+		return nil, nil, i.failure(root, "finalize", err)
 	}
 	leaf, err := x509.ParseCertificate(der[0])
 	if err != nil {
-		return nil, nil, fmt.Errorf("issued certificate: %w", err)
+		return nil, nil, errors.New("issued certificate: invalid encoding")
 	}
 	if !k.PublicKey.Equal(leaf.PublicKey) || !sameHosts(leaf.DNSNames, hosts) {
 		return nil, nil, errors.New("issued certificate does not match the request")
@@ -270,58 +285,4 @@ func (i *Issuer) Issue(ctx context.Context, hosts []string) (chain, key []byte, 
 	}
 	kd, _ := x509.MarshalPKCS8PrivateKey(k)
 	return buf.Bytes(), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: kd}), nil
-}
-
-// File is one file of WriteFiles.
-type File struct {
-	Name string
-	Data []byte
-}
-
-// WriteFiles replaces each dir/<name> atomically, mode mode, in the order given: every temporary
-// file is written and synced before the first rename, so a failed write replaces nothing; the
-// directory is synced after the last rename so that the renames survive a power loss. A crash
-// between two renames can still leave a mix of old and new files: readers of a pair check it
-// (ADR 0005).
-func WriteFiles(dir string, mode os.FileMode, files ...File) error {
-	var tmps []string
-	defer func() {
-		for _, t := range tmps {
-			os.Remove(t) // no-op once renamed
-		}
-	}()
-	for _, file := range files {
-		f, err := os.CreateTemp(dir, "."+file.Name+".*")
-		if err != nil {
-			return err
-		}
-		tmps = append(tmps, f.Name())
-		_, err = f.Write(file.Data)
-		if err == nil {
-			err = f.Chmod(mode)
-		}
-		if err == nil {
-			err = f.Sync()
-		}
-		if cerr := f.Close(); err == nil {
-			err = cerr
-		}
-		if err != nil {
-			return err
-		}
-	}
-	for i, file := range files {
-		if err := os.Rename(tmps[i], filepath.Join(dir, file.Name)); err != nil {
-			return err
-		}
-	}
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	err = d.Sync()
-	if cerr := d.Close(); err == nil {
-		err = cerr
-	}
-	return err
 }
