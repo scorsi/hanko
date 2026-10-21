@@ -73,11 +73,32 @@ func (c *Client) update(ctx context.Context, ns, name, value string, op func(*dn
 	}})
 	m.SetTsig(c.KeyName, dns.HmacSHA256, 300, time.Now().Unix())
 	r, err := c.exchange(ctx, m, ns)
+	if err == nil {
+		err = c.signed(m, r)
+	}
 	if err != nil {
 		return fmt.Errorf("update %s on %s: %w", name, ns, err)
 	}
 	if r.Rcode != dns.RcodeSuccess {
 		return fmt.Errorf("update %s on %s: %s", name, ns, dns.RcodeToString[r.Rcode])
+	}
+	return nil
+}
+
+// signed checks that r answers the signed UPDATE m under the same key. The library verifies a
+// response's MAC, time and request MAC only when it carries a TSIG, so an unsigned reply, success
+// or error, would otherwise be taken at its word (RFC 8945 5.3, ADR 0003).
+func (c *Client) signed(m, r *dns.Msg) error {
+	t := r.IsTsig()
+	switch {
+	case t == nil:
+		return fmt.Errorf("unsigned %s response", dns.RcodeToString[r.Rcode])
+	case !strings.EqualFold(t.Hdr.Name, c.KeyName) || !strings.EqualFold(t.Algorithm, dns.HmacSHA256):
+		return fmt.Errorf("response signed with key %s %s", t.Hdr.Name, t.Algorithm)
+	case t.Error != dns.RcodeSuccess:
+		return fmt.Errorf("response tsig error %s", dns.RcodeToString[int(t.Error)])
+	case !r.Response || r.Opcode != dns.OpcodeUpdate || r.Id != m.Id:
+		return errors.New("response does not answer the update")
 	}
 	return nil
 }
@@ -99,12 +120,15 @@ func (c *Client) zone(ctx context.Context, ns, name string) (string, error) {
 	return "", fmt.Errorf("zone of %s on %s: no SOA in the answer (%s)", name, ns, dns.RcodeToString[r.Rcode])
 }
 
+// exchange sends m over UDP, then over TCP if the reply is truncated. Each attempt gets its own
+// copy: signing removes the TSIG stub from the message it is given, so a reused m would go
+// unsigned over TCP.
 func (c *Client) exchange(ctx context.Context, m *dns.Msg, ns string) (*dns.Msg, error) {
 	cl := &dns.Client{Net: "udp", TsigSecret: map[string]string{c.KeyName: c.Secret}}
-	r, _, err := cl.ExchangeContext(ctx, m, ns)
+	r, _, err := cl.ExchangeContext(ctx, m.Copy(), ns)
 	if err == nil && r.Truncated {
 		cl.Net = "tcp"
-		r, _, err = cl.ExchangeContext(ctx, m, ns)
+		r, _, err = cl.ExchangeContext(ctx, m.Copy(), ns)
 	}
 	return r, err
 }
