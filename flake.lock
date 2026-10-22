@@ -8,11 +8,11 @@
         "zig2nix": "zig2nix"
       },
       "locked": {
-        "lastModified": 1792517395,
-        "narHash": "sha256-4nt7rLH6+u0Yuxdpk11yXk7zq9rDlxj9YA80Vip0y2Q=",
+        "lastModified": 1792694178,
+        "narHash": "sha256-0wP24SRsyvc3gaShTHxFoXzJQbCV9uOhg//pZ/0UHSE=",
         "ref": "refs/heads/main",
-        "rev": "63f10bb9247789c532b1b75eb52da9ca30fae1e2",
-        "revCount": 21,
+        "rev": "6a66b34da193274e33187eb3a3b1b51bde3e86a9",
+        "revCount": 33,
         "type": "git",
         "url": "ssh://git@forgejo.uchi.scorsi.dev:2222/scorsi/annai.git"
       },
@@ -136,11 +136,11 @@
         "rev": "a4e3dde572b49868cb5898ddaafd0202f046dfaa",
         "revCount": 14,
         "type": "git",
-        "url": "ssh://git@ishizue.tail9883f3.ts.net:2222/scorsi/masu.git"
+        "url": "ssh://git@forgejo.uchi.scorsi.dev:2222/scorsi/masu.git"
       },
       "original": {
         "type": "git",
-        "url": "ssh://git@ishizue.tail9883f3.ts.net:2222/scorsi/masu.git"
+        "url": "ssh://git@forgejo.uchi.scorsi.dev:2222/scorsi/masu.git"
       }
     },
     "nisshi": {
@@ -159,11 +159,11 @@
         "rev": "ce1e1ac72ff0fe8d34b94d1e1339cf989a67a365",
         "revCount": 14,
         "type": "git",
-        "url": "ssh://git@ishizue.tail9883f3.ts.net:2222/scorsi/nisshi.git"
+        "url": "ssh://git@forgejo.uchi.scorsi.dev:2222/scorsi/nisshi.git"
       },
       "original": {
         "type": "git",
-        "url": "ssh://git@ishizue.tail9883f3.ts.net:2222/scorsi/nisshi.git"
+        "url": "ssh://git@forgejo.uchi.scorsi.dev:2222/scorsi/nisshi.git"
       }
     },
     "nisshi_2": {
