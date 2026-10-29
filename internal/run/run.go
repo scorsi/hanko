@@ -88,8 +88,7 @@ func (r *Runner) Run(ctx context.Context, certs []config.Certificate) error {
 	for _, c := range certs {
 		ok, err := r.one(ctx, root, c)
 		last.Certificates[c.Name] = result{Result: "ok"}
-		if err != nil {
-			r.Log.Error("", "event", "certificate-failed", "certificate", c.Name, "err", err)
+		if err != nil { // certificate-failed is logged by one
 			errs = append(errs, fmt.Errorf("%s: %w", c.Name, err))
 			last.Certificates[c.Name] = result{Result: "failed", Err: err.Error()}
 			final = final || noQuickRetry(err)
@@ -106,10 +105,16 @@ func (r *Runner) Run(ctx context.Context, certs []config.Certificate) error {
 		r.Log.Error("", "event", "last-run-write-failed", "err", err)
 		errs = append(errs, err)
 	}
-	r.Log.Info("", "event", "run-completed", "certificates", len(certs), "renewed", renewed, "failed", failed, "dur_us", time.Since(start).Microseconds())
-	if final {
+	// exit is hanko-node's exit status (ADR 0001): 10 when a quick retry cannot help.
+	exit := 0
+	switch {
+	case final:
+		exit = 10
 		errs = append(errs, issuer.ErrNoQuickRetry)
+	case len(errs) > 0:
+		exit = 1
 	}
+	r.Log.Info("", "event", "run-completed", "certificates", len(certs), "renewed", renewed, "failed", failed, "exit", exit, "dur_us", time.Since(start).Microseconds())
 	return errors.Join(errs...)
 }
 
@@ -136,8 +141,19 @@ func groupID(name string) (int, error) {
 	return strconv.Atoi(group.Gid)
 }
 
-// one reports whether it renewed c.
-func (r *Runner) one(ctx context.Context, root *os.Root, c config.Certificate) (bool, error) {
+// one reports whether it renewed c, and logs certificate-failed with the expiry of the pair
+// still served, so an alert can tell a failure with time left from an expired certificate.
+func (r *Runner) one(ctx context.Context, root *os.Root, c config.Certificate) (renewed bool, err error) {
+	var chain []byte
+	defer func() {
+		if err != nil {
+			args := []any{"event", "certificate-failed", "certificate", c.Name}
+			if na := notAfter(chain); na != "" {
+				args = append(args, "not_after", na)
+			}
+			r.Log.Error("", append(args, "err", err)...)
+		}
+	}()
 	gid, err := groupID(c.Group)
 	if err != nil {
 		return false, err
@@ -148,7 +164,7 @@ func (r *Runner) one(ctx context.Context, root *os.Root, c config.Certificate) (
 	}
 	defer dir.Close()
 	internal := c.Issuer == "internal"
-	chain, err := state.ReadOptional(dir, certFile(c), 0o640, gid)
+	chain, err = state.ReadOptional(dir, certFile(c), 0o640, gid)
 	if err != nil {
 		return false, err
 	}
@@ -190,7 +206,6 @@ func (r *Runner) one(ctx context.Context, root *os.Root, c config.Certificate) (
 		r.Log.Info("", "event", "certificate-written", "certificate", c.Name, "not_after", notAfter(chain))
 		return nil
 	}
-	renewed := false
 	// A pair an earlier run issued but did not finish publishing is installed without a new
 	// order: two renames are not atomic together (review H3, ADR 0009).
 	if savedChain, savedKey, ok := issuedPair(pending); ok && due(savedChain) == "" &&
@@ -210,6 +225,9 @@ func (r *Runner) one(ctx context.Context, root *os.Root, c config.Certificate) (
 		names := []any{"hosts", c.Hosts}
 		if internal {
 			names = []any{"spiffe_id", c.SpiffeID}
+		}
+		if na := notAfter(chain); na != "" {
+			names = append(names, "not_after", na) // the pair served until the renewal succeeds
 		}
 		r.Log.Info("", append([]any{"event", "certificate-renewing", "certificate", c.Name, "reason", reason}, names...)...)
 		// Persist intent before the order: also proves the directory is writable before spending it.

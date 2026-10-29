@@ -361,7 +361,38 @@ func Serve(ctx context.Context, cfg *Config, log *slog.Logger) error {
 	}()
 	log.Info("", "event", "ca-started", "listen", cfg.CA.Listen, "hosts", len(cfg.Hosts),
 		"ca_not_after", c.cert.NotAfter.UTC().Format(logging.TS))
-	return srv.Serve(limitListener(lis, maxConns))
+	c.logExpiry()
+	go func() {
+		t := time.NewTicker(24 * time.Hour)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				c.logExpiry()
+			}
+		}
+	}()
+	return srv.Serve(limitListener(lis, maxConns, log))
+}
+
+// expiryWarning is `hanko status`'s threshold (ADR 0011): a rotation (ADR 0012) takes days.
+const expiryWarning = 30 * 24 * time.Hour
+
+// logExpiry writes ca-expiring when the signing CA certificate ends within expiryWarning:
+// warn, error once it has expired (Sign is then refused).
+func (c *CA) logExpiry() {
+	left := c.cert.NotAfter.Sub(c.now())
+	if left >= expiryWarning {
+		return
+	}
+	level := slog.LevelWarn
+	if left <= 0 {
+		level = slog.LevelError
+	}
+	c.log.Log(context.Background(), level, "", "event", "ca-expiring",
+		"ca_not_after", c.cert.NotAfter.UTC().Format(logging.TS))
 }
 
 // newServer is the gRPC server with hanko-ca's limits (see the constants).
@@ -378,9 +409,11 @@ func newServer(c *CA) *grpc.Server {
 	return srv
 }
 
-// limitListener accepts at most n connections at once; Accept waits for a slot.
-func limitListener(l net.Listener, n int) net.Listener {
-	return &limited{Listener: l, slots: make(chan struct{}, n), done: make(chan struct{})}
+// limitListener holds at most n connections at once: Accept takes the next connection, then
+// waits for a slot, logging connection-limit (rate-limited) when it has to.
+func limitListener(l net.Listener, n int, log *slog.Logger) net.Listener {
+	return &limited{Listener: l, slots: make(chan struct{}, n), done: make(chan struct{}),
+		full: limitLog{log: log, scope: "all", limit: n}}
 }
 
 type limited struct {
@@ -388,18 +421,24 @@ type limited struct {
 	slots chan struct{}
 	done  chan struct{}
 	once  sync.Once
+	full  limitLog
 }
 
 func (l *limited) Accept() (net.Conn, error) {
-	select {
-	case l.slots <- struct{}{}:
-	case <-l.done:
-		return nil, net.ErrClosed
-	}
 	conn, err := l.Listener.Accept()
 	if err != nil {
-		<-l.slots
 		return nil, err
+	}
+	select {
+	case l.slots <- struct{}{}:
+	default:
+		l.full.hit(netip.Addr{})
+		select {
+		case l.slots <- struct{}{}:
+		case <-l.done:
+			conn.Close()
+			return nil, net.ErrClosed
+		}
 	}
 	return &slotConn{Conn: conn, free: func() { <-l.slots }}, nil
 }
@@ -407,6 +446,33 @@ func (l *limited) Accept() (net.Conn, error) {
 func (l *limited) Close() error {
 	l.once.Do(func() { close(l.done) })
 	return l.Listener.Close()
+}
+
+// limitLog writes connection-limit at most once a minute per scope, so a flood of connections
+// cannot flood the journal; count is the hits since the previous line, this one included.
+type limitLog struct {
+	log   *slog.Logger
+	scope string // "all": every caller together
+	limit int
+	mu    sync.Mutex
+	last  time.Time
+	count int
+}
+
+func (l *limitLog) hit(peer netip.Addr) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.count++
+	now := time.Now()
+	if !l.last.IsZero() && now.Sub(l.last) < time.Minute {
+		return
+	}
+	args := []any{"event", "connection-limit", "scope", l.scope, "limit", l.limit}
+	if peer.IsValid() {
+		args = append(args, "peer", peer.String())
+	}
+	l.log.Warn("", append(args, "count", l.count)...)
+	l.last, l.count = now, 0
 }
 
 type slotConn struct {

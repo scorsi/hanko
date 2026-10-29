@@ -349,7 +349,7 @@ func TestRunSkipsInactiveUnits(t *testing.T) {
 	for _, want := range []*regexp.Regexp{
 		regexp.MustCompile(`"event":"certificate-written","certificate":"home","not_after":"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{9}Z"`),
 		regexp.MustCompile(`"event":"reload-skipped","certificate":"home","unit":"other.service"`),
-		regexp.MustCompile(`"event":"run-completed","certificates":1,"renewed":1,"failed":0,"dur_us":\d+}`),
+		regexp.MustCompile(`"event":"run-completed","certificates":1,"renewed":1,"failed":0,"exit":0,"dur_us":\d+}`),
 	} {
 		if !want.MatchString(s) {
 			t.Errorf("no %s in log:\n%s", want, s)

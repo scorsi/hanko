@@ -19,7 +19,7 @@ hanko is a oneshot that listens on nothing (ADR-0001): there is no process alive
   | `config-invalid` | error | `err` |
   | `run-failed` (the run stopped before any certificate: lock file) | error | `err` |
   | `certificate-valid` | info | `certificate`, `not_after` |
-  | `certificate-renewing` (`reason` includes "key absent or not matching the certificate") | info | `certificate`, `reason`, `hosts` |
+  | `certificate-renewing` (`reason` includes "key absent or not matching the certificate") | info | `certificate`, `reason`, `hosts`, `not_after` (amended 2026-10-29, see below) |
   | `account-key-missing` (no account key and `create_account` off, ADR-0008; the certificate then fails) | error | `path`, `err` |
   | `acme-account-register` (before the registration request) | info | `directory` |
   | `acme-account` (amended 2026-10-21, see below) | info | `directory`, `uri` |
@@ -27,8 +27,8 @@ hanko is a oneshot that listens on nothing (ADR-0001): there is no process alive
   | `reload-skipped` (unit not active, ADR-0005) | info | `certificate`, `unit` |
   | `reload-failed` | error | `certificate`, `unit`, `err` |
   | `challenge-delete-failed` | warn | `name`, `err` |
-  | `certificate-failed` (also a certificate directory that is missing or not as the module makes it, before any order) | error | `certificate`, `err` |
-  | `run-completed`, once per run that held the lock | info | `certificates`, `renewed`, `failed`, `dur_us` |
+  | `certificate-failed` (also a certificate directory that is missing or not as the module makes it, before any order) | error | `certificate`, `not_after` (amended 2026-10-29), `err` |
+  | `run-completed`, once per run that held the lock | info | `certificates`, `renewed`, `failed`, `exit` (amended 2026-10-29), `dur_us` |
 
   `not_after` is the leaf's expiry in the `ts` format. `run-completed` is the per-run summary of M3, pulled forward; it is written whether certificates failed or not, the exit status (ADR-0001) still says which.
 - **No journald rate limit default** in the module: a run writes a few lines per certificate.
@@ -62,6 +62,8 @@ The deployment pins hanko's ACME account in its CAA records (RFC 8657 `accountur
 | `sign-refused` (ID not allowed for the address, a CSR refused, or the CA certificate expired; `spiffe_id` cut at 256 bytes) | warn | `peer`, `spiffe_id`, `err` |
 | `bundle-refused` (`Bundle()` from an address not in `hosts`) | warn | `peer`, `err` |
 | `grpc-error` (an error line of grpc-go) | error | `err` |
+| `ca-expiring` (amended 2026-10-29, see below) | warn, error once expired | `ca_not_after` |
+| `connection-limit` (amended 2026-10-29, see below) | warn | `scope`, `limit`, `count` |
 
 ## Amendment 2026-10-29: the internal issuer
 
@@ -74,3 +76,30 @@ The `internal` issuer (ADR 0004) writes the events above with `svid.pem` as the 
 
 A run that cannot reach `hanko-ca` fails the certificate (`certificate-failed`) even when its SVID
 is still valid: the bundle is refreshed on every run, and a stale one must reach `OnFailure=`.
+
+## Amendment 2026-10-29: observability through logs only (owner decision)
+
+`hanko-node` is a oneshot and `hanko-ca` serves gRPC only: neither has an HTTP server, and
+adding one for a scrape is not wanted. Owner decision: **neither exposes metrics**; the
+`/metrics` paragraph above and the "series remain future work" of the `hanko-ca` amendment are
+withdrawn. Everything an operator or an alerting rule needs is a schema v1 log event, collected
+from journald by the deployment's log agent. The rules themselves come with the observability
+stack; the events they will need:
+
+- **A certificate close to expiry or expired** (ACME or SVID): every run writes the served
+  leaf's `not_after` for every certificate, in `certificate-valid`, `certificate-written`, and
+  now `certificate-renewing` and `certificate-failed` (absent when no pair is served yet). A
+  failing certificate thus carries its remaining time on the failure line itself.
+- **A failed run and its class**: `run-completed` gains `exit`, the status `hanko-node` exits
+  with (ADR-0001): `0`, `1` (transient, retried) or `10` (a quick retry cannot fix it). A run
+  that stops before the lock writes `run-failed` and exits 1.
+- **The signing CA close to expiry**: `hanko-ca` writes `ca-expiring` (`ca_not_after`) at
+  start and then every 24 h while the signing CA certificate ends within **30 days**, the
+  threshold of `hanko status` (ADR-0011 amendment): `warn`, `error` once it has expired (`Sign`
+  is then refused, ADR-0004). On the hosts, `hanko status` keeps its `ca_expiring` field.
+- **Refused calls**: `sign-refused` and `bundle-refused`, unchanged.
+- **Connection limits hit**: `connection-limit` (`warn`) when `hanko-ca` holds a connection
+  back because a limit is reached. `scope` is `all` for the global cap (`limit` 64, the
+  connection waits for a free slot; no `peer`). At most one line per scope per minute, so a
+  flood cannot flood the journal; `count` is the hits since the previous line of that scope,
+  this one included.

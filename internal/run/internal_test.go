@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -124,7 +125,10 @@ func TestInternal(t *testing.T) {
 	if err := r.Run(ctx, []config.Certificate{other}); !errors.Is(err, issuer.ErrNoQuickRetry) || !strings.Contains(err.Error(), "PermissionDenied") {
 		t.Fatalf("refused ID: %v", err)
 	}
-	if !bytes.Equal(read(t, r, "svid.pem"), current) || !strings.Contains(log.String(), `"event":"certificate-failed","certificate":"api"`) {
+	if !bytes.Equal(read(t, r, "svid.pem"), current) ||
+		!regexp.MustCompile(`"event":"certificate-failed","certificate":"api","not_after":"[0-9T:.-]+Z","err":`).MatchString(log.String()) ||
+		!strings.Contains(log.String(), `"failed":1,"exit":10,`) ||
+		!strings.Contains(log.String(), `"event":"certificate-renewing","certificate":"api","reason":"spiffe_id changed","spiffe_id":"spiffe://uchi.example.org/vm/git","not_after":"`) {
 		t.Fatalf("refused ID: log %s", log)
 	}
 }
@@ -133,13 +137,17 @@ func TestInternal(t *testing.T) {
 // a stale bundle is noticed (OnFailure); the files stay.
 func TestInternalUnreachable(t *testing.T) {
 	key, cert := testutil.CACert(t, time.Now().Add(365*24*time.Hour))
-	r, _ := internalSetup(t, testutil.ServeCA(t, key, cert, "24h", idAPI))
+	r, log := internalSetup(t, testutil.ServeCA(t, key, cert, "24h", idAPI))
 	if err := r.Run(context.Background(), []config.Certificate{api}); err != nil {
 		t.Fatal(err)
 	}
 	r.Internal = &svid.Client{Addr: "127.0.0.1:1"}
 	if err := r.Run(context.Background(), []config.Certificate{api}); err == nil || errors.Is(err, issuer.ErrNoQuickRetry) {
 		t.Fatalf("run without hanko-ca: %v, want a retryable failure", err)
+	}
+	if !strings.Contains(log.String(), `"event":"certificate-failed","certificate":"api","not_after":"`) ||
+		!strings.Contains(log.String(), `"failed":1,"exit":1,`) {
+		t.Fatalf("log: %s", log)
 	}
 	line, err := status(t, r, api)
 	if err != nil || line["valid"] != true || line["last_result"] != "failed" {

@@ -171,6 +171,7 @@ pkgs.testers.runNixOSTest {
           )
           out = alpha.fail(f"STATE_DIRECTORY=/root/stolen {node_bin} run /root/stolen.toml 2>&1")
           assert '"event":"certificate-failed","certificate":"svc"' in out and "PermissionDenied" in out, out
+          assert '"failed":1,"exit":10,' in out, out
           alpha.fail("test -e /root/stolen/svc/svid.pem")
           out = ca.succeed(journal("hanko-ca.service"))
           assert f'"event":"sign-refused","peer":"{alpha_ip}","spiffe_id":"{beta_id}"' in out, out

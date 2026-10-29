@@ -368,7 +368,7 @@ func TestGRPC(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv := newServer(c)
-	go srv.Serve(limitListener(lis, maxConns))
+	go srv.Serve(limitListener(lis, maxConns, c.log))
 	t.Cleanup(srv.Stop)
 	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -430,7 +430,8 @@ func TestLimitListener(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lis := limitListener(inner, 1)
+	var log bytes.Buffer
+	lis := limitListener(inner, 1, logging.New(&log, nil))
 	defer lis.Close()
 	for range 2 {
 		c, err := net.Dial("tcp", inner.Addr().String())
@@ -461,6 +462,9 @@ func TestLimitListener(t *testing.T) {
 			t.Fatal("accept failed")
 		}
 		c.Close()
+		if !strings.Contains(log.String(), `"level":"warn","v":1,"event":"connection-limit","scope":"all","limit":1,"count":1}`) {
+			t.Errorf("no connection-limit line: %s", log.String())
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("closing the first connection did not free its slot")
 	}
@@ -529,5 +533,44 @@ func TestGenerateRefused(t *testing.T) {
 	}
 	if _, _, err := Generate("", 1, now); err == nil {
 		t.Error("empty name accepted")
+	}
+}
+
+// TestLimitLogRate: one connection-limit line a minute, counting the hits in between.
+func TestLimitLogRate(t *testing.T) {
+	var log bytes.Buffer
+	l := limitLog{log: logging.New(&log, nil), scope: "all", limit: 64}
+	for range 3 {
+		l.hit(netip.Addr{})
+	}
+	if n := strings.Count(log.String(), "connection-limit"); n != 1 {
+		t.Fatalf("%d lines in a minute: %s", n, log.String())
+	}
+	l.last = l.last.Add(-time.Minute)
+	l.hit(netip.MustParseAddr("fd12:3456:789a::2"))
+	if !strings.Contains(log.String(), `"event":"connection-limit","scope":"all","limit":64,"peer":"fd12:3456:789a::2","count":3}`) {
+		t.Fatalf("second line: %s", log.String())
+	}
+}
+
+// TestExpiryLog: ca-expiring within 30 days of the signing CA's end, error once it has passed.
+func TestExpiryLog(t *testing.T) {
+	var log bytes.Buffer
+	c := newCA(t, &log)
+	c.logExpiry()
+	if log.Len() != 0 {
+		t.Fatalf("far from expiry: %s", log.String())
+	}
+	c.now = func() time.Time { return c.cert.NotAfter.Add(-29 * 24 * time.Hour) }
+	c.logExpiry()
+	want := `"event":"ca-expiring","ca_not_after":"` + c.cert.NotAfter.UTC().Format(logging.TS) + `"}`
+	if !strings.Contains(log.String(), `"level":"warn","v":1,`+want) {
+		t.Fatalf("within 30 days: %s", log.String())
+	}
+	log.Reset()
+	c.now = func() time.Time { return c.cert.NotAfter.Add(time.Second) }
+	c.logExpiry()
+	if !strings.Contains(log.String(), `"level":"error","v":1,`+want) {
+		t.Fatalf("expired: %s", log.String())
 	}
 }
