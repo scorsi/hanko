@@ -47,7 +47,7 @@ func TestSign(t *testing.T) {
 	if leaf.URIs[0].String() != idAPI || !bytes.Equal(bundle, cert) || SigningCA(leaf, bundle) == nil {
 		t.Fatalf("svid %v, bundle %q", leaf.URIs, bundle)
 	}
-	if r := Due(s, bundle, idAPI, time.Now()); r != "" {
+	if r := Due(s, bundle, idAPI, 0.5, time.Now()); r != "" {
 		t.Fatalf("fresh SVID due: %s", r)
 	}
 
@@ -91,17 +91,22 @@ func TestDueRealLifetime(t *testing.T) {
 		name         string
 		svid, bundle []byte
 		id           string
+		fraction     float64
 		at           time.Time
 		want         string
 	}{
-		{"fresh", s, bundle, idAPI, now, ""},
-		{"past half", s, bundle, idAPI, now.Add(5 * time.Minute), "less than half of its lifetime left"},
-		{"absent", nil, bundle, idAPI, now, "absent"},
-		{"garbage", []byte("x"), bundle, idAPI, now, "unreadable"},
-		{"other id", s, bundle, idGit, now, "spiffe_id changed"},
-		{"CA gone from the bundle", s, func() []byte { _, c := testutil.CACert(t, now.Add(time.Hour)); return c }(), idAPI, now, "not signed by a CA of the bundle"},
+		{"fresh", s, bundle, idAPI, 0.5, now, ""},
+		{"past half", s, bundle, idAPI, 0.5, now.Add(5 * time.Minute), "less than half of its lifetime left"},
+		{"past half, renew at a quarter", s, bundle, idAPI, 0.25, now.Add(5 * time.Minute), ""},
+		{"past three quarters", s, bundle, idAPI, 0.25, now.Add(8 * time.Minute), "less than 0.25 of its lifetime left"},
+		{"before a 0.85 renewal point", s, bundle, idAPI, 0.85, now, ""},
+		{"past a 0.85 renewal point", s, bundle, idAPI, 0.85, now.Add(2 * time.Minute), "less than 0.85 of its lifetime left"},
+		{"absent", nil, bundle, idAPI, 0.5, now, "absent"},
+		{"garbage", []byte("x"), bundle, idAPI, 0.5, now, "unreadable"},
+		{"other id", s, bundle, idGit, 0.5, now, "spiffe_id changed"},
+		{"CA gone from the bundle", s, func() []byte { _, c := testutil.CACert(t, now.Add(time.Hour)); return c }(), idAPI, 0.5, now, "not signed by a CA of the bundle"},
 	} {
-		if got := Due(tc.svid, tc.bundle, tc.id, tc.at); got != tc.want {
+		if got := Due(tc.svid, tc.bundle, tc.id, tc.fraction, tc.at); got != tc.want {
 			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
 		}
 	}

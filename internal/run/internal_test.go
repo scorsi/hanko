@@ -34,7 +34,7 @@ func internalSetup(t *testing.T, addr string) (*Runner, *bytes.Buffer) {
 	}
 	testutil.SetgidDir(t, dir)
 	var log bytes.Buffer
-	r := &Runner{Internal: &svid.Client{Addr: addr}, StateDir: state, Log: logging.New(&log, nil)}
+	r := &Runner{Internal: &svid.Client{Addr: addr}, StateDir: state, Log: logging.New(&log, nil), RenewFraction: 0.5}
 	r.Reload = func(_ context.Context, unit string) error {
 		t.Errorf("reload of %s for an internal certificate", unit)
 		return nil

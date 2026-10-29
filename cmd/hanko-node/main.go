@@ -55,6 +55,7 @@ func main() {
 	}
 	if cfg.Internal != nil {
 		r.Internal = &svid.Client{Addr: cfg.Internal.CA}
+		r.RenewFraction = cfg.Internal.Fraction()
 	}
 	if err := r.Run(ctx, cfg.Certificates); errors.Is(err, issuer.ErrNoQuickRetry) {
 		os.Exit(exitNoQuickRetry) // already logged by Run (certificate-failed)

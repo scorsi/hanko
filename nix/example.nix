@@ -30,6 +30,7 @@
       group = "genkan";
     };
     internal.ca = "[fd12:3456:789a::1]:4900";
+    internal.renewFraction = 0.25;
     certificates.api = {
       issuer = "internal";
       spiffeId = "spiffe://uchi.example.org/vm/api";

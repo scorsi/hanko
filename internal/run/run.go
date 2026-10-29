@@ -49,6 +49,8 @@ type Runner struct {
 	StateDir string
 	Reload   func(ctx context.Context, unit string) error
 	Log      *slog.Logger
+	// RenewFraction is [internal] renew_fraction (config.Internal.Fraction).
+	RenewFraction float64
 }
 
 // Run handles every certificate and returns an error naming each one that was due and could
@@ -187,7 +189,7 @@ func (r *Runner) one(ctx context.Context, root *os.Root, c config.Certificate) (
 		if newBundle, err = r.Internal.Bundle(ctx); err != nil {
 			return false, err
 		}
-		due = func(chain []byte) string { return svid.Due(chain, newBundle, c.SpiffeID, time.Now()) }
+		due = func(chain []byte) string { return svid.Due(chain, newBundle, c.SpiffeID, r.RenewFraction, time.Now()) }
 	}
 	publish := func(newChain, newKey []byte) error {
 		var files []state.File

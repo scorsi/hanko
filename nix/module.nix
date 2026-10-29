@@ -50,7 +50,10 @@ let
       };
     }
     // lib.optionalAttrs (uses "internal") {
-      internal.ca = cfg.internal.ca;
+      internal = {
+        inherit (cfg.internal) ca;
+        renew_fraction = cfg.internal.renewFraction;
+      };
     }
     // {
       certificates = lib.mapAttrsToList (
@@ -152,6 +155,16 @@ in
       type = types.str;
       example = "[fd12:3456:789a::1]:4900";
       description = "hanko-ca's overlay address and port, for `internal` certificates (ADR 0004).";
+    };
+
+    internal.renewFraction = mkOption {
+      type = types.float;
+      default = 0.5;
+      example = 0.25;
+      description = ''
+        An SVID is renewed once less than this fraction of its lifetime is left, strictly between
+        0 and 1 (ADR 0004). Its lifetime is hanko-ca's `svidLifetime`.
+      '';
     };
 
     certificates = mkOption {

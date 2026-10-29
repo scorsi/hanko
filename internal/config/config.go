@@ -47,6 +47,17 @@ type DNS struct {
 type Internal struct {
 	// CA is hanko-ca's overlay address, host:port.
 	CA string `toml:"ca"`
+	// RenewFraction: an SVID is renewed once less than this fraction of its lifetime is left
+	// (ADR 0004); 0.5 when absent.
+	RenewFraction *float64 `toml:"renew_fraction"`
+}
+
+// Fraction is renew_fraction, already validated by Parse, or its default.
+func (i *Internal) Fraction() float64 {
+	if i.RenewFraction == nil {
+		return 0.5
+	}
+	return *i.RenewFraction
 }
 
 // Certificate holds the keys of every issuer so that a mismatch is reported by name.
@@ -205,6 +216,9 @@ func (c *Config) validate() error {
 	case internalUsed:
 		if ap, err := netip.ParseAddrPort(c.Internal.CA); err != nil || ap.Port() == 0 || ap.Addr().Zone() != "" {
 			add("internal: ca must be a numeric IP address with port 1..65535")
+		}
+		if f := c.Internal.Fraction(); !(f > 0 && f < 1) { // NaN fails both
+			add("internal: renew_fraction must be between 0 and 1, both excluded")
 		}
 	case c.Internal != nil:
 		add("internal: table unused, no certificate has issuer internal")

@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strconv"
 	"time"
 
 	"google.golang.org/grpc"
@@ -130,9 +131,10 @@ func SigningCA(leaf *x509.Certificate, bundle []byte) *x509.Certificate {
 }
 
 // Due returns why the SVID (PEM) must be renewed for id against bundle (PEM), or "" when it
-// need not be. Half of its real lifetime, NotAfter − NotBefore: hanko-ca caps an SVID at its
-// CA's expiry, so near that end an SVID is shorter than the configured lifetime.
-func Due(svid, bundle []byte, id string, now time.Time) string {
+// need not be: once less than fraction (renew_fraction, ADR 0004) of its real lifetime is
+// left, NotAfter − NotBefore, since hanko-ca caps an SVID at its CA's expiry, so near that end
+// an SVID is shorter than the configured lifetime.
+func Due(svid, bundle []byte, id string, fraction float64, now time.Time) string {
 	if len(svid) == 0 {
 		return "absent"
 	}
@@ -149,8 +151,12 @@ func Due(svid, bundle []byte, id string, now time.Time) string {
 	case SigningCA(leaf, bundle) == nil:
 		// e.g. its CA was removed from the bundle after a rotation (ADR 0012).
 		return "not signed by a CA of the bundle"
-	case leaf.NotAfter.Sub(now) < leaf.NotAfter.Sub(leaf.NotBefore)/2:
-		return "less than half of its lifetime left"
+	case leaf.NotAfter.Sub(now) < time.Duration(float64(leaf.NotAfter.Sub(leaf.NotBefore))*fraction):
+		left := "half"
+		if fraction != 0.5 {
+			left = strconv.FormatFloat(fraction, 'g', -1, 64)
+		}
+		return "less than " + left + " of its lifetime left"
 	}
 	return ""
 }

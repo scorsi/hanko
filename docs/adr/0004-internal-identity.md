@@ -71,3 +71,14 @@ hanko no longer reloads or restarts the consumers of an SVID: it writes the file
 each consumer re-reads them in-process when they change
 ([ADR-0013](0013-consumers-reload-internal-certificates.md)). The "Files per certificate" and
 "Lifetime" bullets above are read with that change.
+
+## Amendment 2026-10-29: the renewal fraction is a key
+
+"Lifetime 24 h, renewed when less than half remains; both configurable" gets its second key.
+The lifetime stays `hanko-ca`'s `svid_lifetime`. The fraction is `renew_fraction` in the
+oneshot's `[internal]` table (ADR-0002: issuer-specific keys live under the issuer's table), a
+number strictly between 0 and 1, default `0.5`; `hanko-node check` refuses any other value. An
+SVID is renewed once less than that fraction of its real lifetime (`NotAfter` − `NotBefore`) is
+left. One value per host, not per certificate: every SVID of a host comes from the same
+`hanko-ca` with the same lifetime, and the timer period, which the fraction must span, is per
+host too. NixOS option `services.hanko-node.internal.renewFraction`.

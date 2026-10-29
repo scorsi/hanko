@@ -161,6 +161,7 @@
             # The internal issuer's table and keys reach the file (ADR 0002, ADR 0004).
             assert
               evaluated.services.hanko-node.settings.internal.ca == "[fd12:3456:789a::1]:4900"
+              && evaluated.services.hanko-node.settings.internal.renew_fraction == 0.25
               && lib.any (
                 c: c.issuer == "internal" && c.spiffe_id == "spiffe://uchi.example.org/vm/api" && !(c ? hosts)
               ) evaluated.services.hanko-node.settings.certificates;

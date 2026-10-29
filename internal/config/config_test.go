@@ -63,9 +63,14 @@ func TestInternal(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if c.Internal.CA != "[fd12:3456:789a::1]:4900" || c.Certificates[len(c.Certificates)-1].SpiffeID != "spiffe://uchi.example.org/vm/api" {
+		if c.Internal.CA != "[fd12:3456:789a::1]:4900" || c.Certificates[len(c.Certificates)-1].SpiffeID != "spiffe://uchi.example.org/vm/api" ||
+			c.Internal.Fraction() != 0.5 {
 			t.Fatalf("unexpected decode: %+v", c)
 		}
+	}
+	c, err := Parse([]byte(internalTable + "renew_fraction = 0.25\n" + apiCert))
+	if err != nil || c.Internal.Fraction() != 0.25 {
+		t.Fatalf("renew_fraction: %v", err)
 	}
 }
 
@@ -83,6 +88,9 @@ func TestInvalid(t *testing.T) {
 		"unused internal":    {head + home + internalTable, "internal: table unused"},
 		"missing internal":   {apiCert, "internal: table required"},
 		"bad internal ca":    {strings.Replace(internalTable, ":4900", "", 1) + apiCert, "internal: ca"},
+		"renew_fraction 0":   {internalTable + "renew_fraction = 0.0\n" + apiCert, "renew_fraction"},
+		"renew_fraction 1":   {internalTable + "renew_fraction = 1.0\n" + apiCert, "renew_fraction"},
+		"renew_fraction nan": {internalTable + "renew_fraction = nan\n" + apiCert, "renew_fraction"},
 		"bad spiffe_id":      {internalTable + strings.Replace(apiCert, "/vm/api", "/api", 1), "spiffe_id"},
 		"hosts on internal":  {internalTable + apiCert + "hosts = [\"a.example.org\"]\n", "hosts belong"},
 		"reload on internal": {internalTable + apiCert + "reload = [\"api.service\"]\n", "reload belongs"},
