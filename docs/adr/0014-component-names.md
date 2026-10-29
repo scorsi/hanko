@@ -49,3 +49,25 @@ Earlier ADRs keep their text: read `hanko run`, `hanko.service`, `hanko-renew.se
   `hanko-renew.service`. Logs carry no binary name: the journal's `_SYSTEMD_UNIT`, hence the
   `service` field nisshi's agent adds (ADR-0007), changes with the unit name, so log queries
   on the old unit name must follow.
+
+## Amendment 2026-10-29: `hanko ca keygen` (owner decision)
+
+The operator CLI gains `hanko ca keygen --name CN [--days N] --cert FILE`, as kekkai's CLI has
+`kekkai ca keygen`. It creates the CA `hanko-ca` loads (ADR-0004): an ECDSA P-256 key, printed in
+PKCS #8 PEM on stdout only, never in a file, argv or a log, to be piped into `age -e` or sops and
+used as `key_file`; and a self-signed certificate written to `FILE`, which must not exist, to be
+used as (or appended to) `cert_file`.
+
+- Certificate: subject `CN=<name>` alone; random serial; `NotBefore` one minute in the past, as
+  for an SVID; `NotAfter` now plus `N` days (default 3650; 0, negative or past 9999-12-31 is
+  refused); basicConstraints critical `CA:TRUE, pathlen:0`, since it signs SVIDs and never an
+  intermediate (ADR-0004 rules per-host intermediates out); keyUsage critical `keyCertSign`
+  alone, since hanko publishes no CRL (short-lived SVIDs replace revocation); a subject key
+  identifier. No name constraint: ADR-0004 does not ask for one, and `hanko-ca` already signs
+  only the IDs of its configuration.
+- The output is checked by `hanko-ca`'s own start-up checks before anything is written.
+- The certificate is written first; if the key cannot be written to stdout (the pipe's reader
+  exited), the certificate is removed and the command fails, so no certificate exists without
+  its key.
+- A terminal on stdout is not refused, as with kekkai: printing the key there is a visible
+  operator choice, and a check would only add an override flag.

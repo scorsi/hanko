@@ -14,6 +14,7 @@ import (
 	"encoding/asn1"
 	"encoding/pem"
 	"errors"
+	"math"
 	"math/big"
 	"net"
 	"net/netip"
@@ -466,5 +467,67 @@ func TestLimitListener(t *testing.T) {
 	lis.Close()
 	if _, err := lis.Accept(); !errors.Is(err, net.ErrClosed) {
 		t.Errorf("accept after close: %v", err)
+	}
+}
+
+// keygen -> hanko-ca's loader -> an SVID for a CSR -> it verifies against the generated cert.
+func TestGenerateRoundTrip(t *testing.T) {
+	now := time.Now()
+	keyPEM, certPEM, err := Generate("hanko CA", 3650, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := ParseConfig([]byte(strings.Replace(example, `address = "fd12:3456:789a::2"`, `address = "127.0.0.1"`, 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := New(cfg, keyPEM, certPEM, logging.New(&bytes.Buffer{}, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := c.cert
+	if root.Subject.CommonName != "hanko CA" || !root.IsCA || root.MaxPathLen != 0 || !root.MaxPathLenZero ||
+		root.KeyUsage != x509.KeyUsageCertSign || len(root.SubjectKeyId) == 0 ||
+		!root.NotBefore.Equal(now.Add(-backdate).Truncate(time.Second)) ||
+		!root.NotAfter.Equal(now.UTC().AddDate(0, 0, 3650).Truncate(time.Second)) {
+		t.Fatalf("CA fields: %+v", root)
+	}
+	for _, e := range root.Extensions {
+		if (e.Id.Equal(asn1.ObjectIdentifier{2, 5, 29, 19}) || e.Id.Equal(asn1.ObjectIdentifier{2, 5, 29, 15})) && !e.Critical {
+			t.Fatalf("extension %v not critical", e.Id)
+		}
+	}
+	der, err := c.sign(local, csr(t, p256(t), idAPI), idAPI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := x509.NewCertPool()
+	pool.AddCert(root)
+	if _, err := leaf.Verify(x509.VerifyOptions{Roots: pool, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}}); err != nil {
+		t.Fatal(err)
+	}
+	other, _, _ := Generate("hanko CA", 1, now)
+	if _, _, _, err := parseCA(other, certPEM, now); err == nil {
+		t.Fatal("a foreign key matched the generated certificate")
+	}
+}
+
+func TestGenerateRefused(t *testing.T) {
+	now := time.Date(2026, 10, 29, 0, 0, 0, 0, time.UTC)
+	last := int((maxNotAfter.Unix() - now.Unix()) / 86400) // ends 9999-12-31 00:00:00
+	if _, _, err := Generate("ca", last, now); err != nil {
+		t.Fatalf("last valid day refused: %v", err)
+	}
+	for _, days := range []int{0, -1, last + 1, 3_000_001, math.MaxInt} {
+		if _, _, err := Generate("ca", days, now); err == nil {
+			t.Errorf("days %d accepted", days)
+		}
+	}
+	if _, _, err := Generate("", 1, now); err == nil {
+		t.Error("empty name accepted")
 	}
 }

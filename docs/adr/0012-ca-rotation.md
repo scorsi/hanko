@@ -20,8 +20,9 @@ half of its lifetime is left or once no CA of the bundle signed it.
 Rotation is a **manual, two-step** procedure in the deployment, with `hanko-ca` restarted after
 each change of its files:
 
-1. **Publish the new CA.** Some days before the switch, the new CA certificate is added to
-   `cert_file` next to the old one, the old key still signing, and `hanko-ca` is restarted.
+1. **Publish the new CA.** Some days before the switch, a new CA is created with
+   `hanko ca keygen` (ADR-0014 amendment), its key kept in secrets for step 2, and its
+   certificate is added to `cert_file` next to the old one, the old key still signing, and `hanko-ca` is restarted.
    The bundle now carries both certificates; every host writes it on its next run and reloads
    its services, which then trust SVIDs from either CA.
 2. **Switch the signing key**, more than one SVID lifetime later (more than 24 h by default), so

@@ -30,7 +30,8 @@ Four products, one domain each, no shared code between them:
   next timer run; 10 wins when a run has both, 2 a usage error. Units that read
   certificates declare `after` and `wants` `hanko-node.service`, never `requires`.
 - **`hanko`**, the operator CLI: `hanko status` reports every certificate, run
-  as user `hanko`; `hanko check` validates a configuration (ADR 0011, ADR 0014).
+  as user `hanko`; `hanko check` validates a configuration; `hanko ca keygen`
+  creates `hanko-ca`'s CA (ADR 0011, ADR 0014).
 - **ACME issuer**: DNS-01 only, RFC 2136 with TSIG against every annai `soto`
   nameserver, propagation checked by asking each one by address (ADR 0003).
 - **Internal issuer**, v1: SPIFFE IDs under the internal zone, X.509-SVIDs of
@@ -39,6 +40,19 @@ Four products, one domain each, no shared code between them:
   Workload API is reserved as `hanko-agent`, not planned.
 - Files under `/var/lib/hanko/<name>/`, readable by the consumer's group only;
   static users, no capabilities (ADR 0005).
+
+## Creating the CA of `hanko-ca`
+
+```sh
+hanko ca keygen --name "hanko CA" --cert ca.pem | age -e -r <recipient> > ca-key.age
+```
+
+The ECDSA P-256 key goes to stdout only, never to a file: it enters the
+deployment's secrets encrypted and becomes `hanko-ca`'s `key_file`. The
+self-signed certificate (`--days`, default 3650; `--cert` is never overwritten)
+goes into `cert_file`, and so into the trust bundle every host writes as
+`bundle.pem`. For a rotation, the new certificate is appended to `cert_file`
+next to the old one (ADR 0012).
 
 ## Why not NixOS `security.acme`
 

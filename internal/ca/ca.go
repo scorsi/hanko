@@ -63,43 +63,9 @@ type CA struct {
 // New builds a CA from the PEM key (ECDSA P-256, SEC 1 or PKCS #8) and the PEM certificate
 // file, which may hold several CA certificates; the one matching the key signs.
 func New(cfg *Config, keyPEM, certsPEM []byte, log *slog.Logger) (*CA, error) {
-	key, err := parseKey(keyPEM)
+	key, signing, others, err := parseCA(keyPEM, certsPEM, time.Now())
 	if err != nil {
-		return nil, fmt.Errorf("key_file: %w", err)
-	}
-	var signing *x509.Certificate
-	var others [][]byte
-	for rest := certsPEM; ; {
-		var b *pem.Block
-		b, rest = pem.Decode(rest)
-		if b == nil {
-			break
-		}
-		if b.Type != "CERTIFICATE" {
-			return nil, fmt.Errorf("cert_file: unexpected PEM block %q", b.Type)
-		}
-		c, err := x509.ParseCertificate(b.Bytes)
-		if err != nil {
-			return nil, fmt.Errorf("cert_file: %w", err)
-		}
-		if !c.IsCA {
-			return nil, errors.New("cert_file: a certificate is not a CA")
-		}
-		if signing == nil && key.PublicKey.Equal(c.PublicKey) {
-			signing = c
-		} else {
-			others = append(others, c.Raw)
-		}
-	}
-	if signing == nil {
-		return nil, errors.New("cert_file: no CA certificate matches key_file")
-	}
-	if signing.KeyUsage&x509.KeyUsageCertSign == 0 {
-		return nil, errors.New("cert_file: the signing CA certificate lacks keyUsage keyCertSign")
-	}
-	if now := time.Now(); now.Before(signing.NotBefore) || now.After(signing.NotAfter) {
-		return nil, fmt.Errorf("cert_file: the signing CA certificate is not valid now (%s to %s)",
-			signing.NotBefore.UTC().Format(logging.TS), signing.NotAfter.UTC().Format(logging.TS))
+		return nil, err
 	}
 	return &CA{
 		key:      key,
@@ -110,6 +76,99 @@ func New(cfg *Config, keyPEM, certsPEM []byte, log *slog.Logger) (*CA, error) {
 		log:      log,
 		now:      time.Now,
 	}, nil
+}
+
+// parseCA applies hanko-ca's start-up checks to key_file and cert_file and returns the key, the
+// signing certificate and the DER of the others. Generate checks its output with it too.
+func parseCA(keyPEM, certsPEM []byte, now time.Time) (*ecdsa.PrivateKey, *x509.Certificate, [][]byte, error) {
+	key, err := parseKey(keyPEM)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("key_file: %w", err)
+	}
+	var signing *x509.Certificate
+	var others [][]byte
+	for rest := certsPEM; ; {
+		var b *pem.Block
+		b, rest = pem.Decode(rest)
+		if b == nil {
+			break
+		}
+		if b.Type != "CERTIFICATE" {
+			return nil, nil, nil, fmt.Errorf("cert_file: unexpected PEM block %q", b.Type)
+		}
+		c, err := x509.ParseCertificate(b.Bytes)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("cert_file: %w", err)
+		}
+		if !c.IsCA {
+			return nil, nil, nil, errors.New("cert_file: a certificate is not a CA")
+		}
+		if signing == nil && key.PublicKey.Equal(c.PublicKey) {
+			signing = c
+		} else {
+			others = append(others, c.Raw)
+		}
+	}
+	if signing == nil {
+		return nil, nil, nil, errors.New("cert_file: no CA certificate matches key_file")
+	}
+	if signing.KeyUsage&x509.KeyUsageCertSign == 0 {
+		return nil, nil, nil, errors.New("cert_file: the signing CA certificate lacks keyUsage keyCertSign")
+	}
+	if now.Before(signing.NotBefore) || now.After(signing.NotAfter) {
+		return nil, nil, nil, fmt.Errorf("cert_file: the signing CA certificate is not valid now (%s to %s)",
+			signing.NotBefore.UTC().Format(logging.TS), signing.NotAfter.UTC().Format(logging.TS))
+	}
+	return key, signing, others, nil
+}
+
+// maxNotAfter is the last instant X.509 GeneralizedTime can carry (RFC 5280 4.1.2.5).
+var maxNotAfter = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
+
+// Generate makes a new CA for key_file and cert_file (`hanko ca keygen`): an ECDSA P-256 key in
+// PKCS #8 PEM and a self-signed certificate named cn, valid from now (back-dated like an SVID)
+// for days days. pathlen 0: it signs SVIDs only, no intermediate (ADR 0004). keyUsage is
+// keyCertSign alone: hanko publishes no CRL, short-lived SVIDs replace revocation.
+func Generate(cn string, days int, now time.Time) (keyPEM, certPEM []byte, err error) {
+	if cn == "" {
+		return nil, nil, errors.New("--name is required")
+	}
+	// 3,000,000 days (8,000 years) bounds AddDate before the 9999-12-31 check.
+	if days <= 0 || days > 3_000_000 {
+		return nil, nil, fmt.Errorf("--days %d: must be at least 1 and end by 9999-12-31", days)
+	}
+	end := now.UTC().AddDate(0, 0, days)
+	if end.After(maxNotAfter) {
+		return nil, nil, fmt.Errorf("--days %d: must be at least 1 and end by 9999-12-31", days)
+	}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, nil, err
+	}
+	tmpl := &x509.Certificate{
+		// SerialNumber nil: a random RFC 5280 serial. SubjectKeyId empty: Go derives it for a CA.
+		Subject:               pkix.Name{CommonName: cn},
+		NotBefore:             now.Add(-backdate),
+		NotAfter:              end,
+		KeyUsage:              x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+		MaxPathLenZero:        true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		return nil, nil, err
+	}
+	kd, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		return nil, nil, err
+	}
+	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: kd})
+	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	if _, _, _, err := parseCA(keyPEM, certPEM, now); err != nil {
+		return nil, nil, fmt.Errorf("generated CA fails hanko-ca's checks: %w", err)
+	}
+	return keyPEM, certPEM, nil
 }
 
 func parseKey(data []byte) (*ecdsa.PrivateKey, error) {
