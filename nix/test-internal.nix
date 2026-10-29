@@ -3,7 +3,7 @@
 # authenticate each other by SPIFFE ID over mutual TLS; an ID not allowed for the caller's address
 # is refused; a run with nothing due still refreshes the bundle (rotation step (a) of ADR 0012 adds
 # a second CA); the timer renews both SVIDs and both services serve the new ones, read from their
-# files, with neither a reload nor a restart from hanko (ADR 0013). Every line of hanko and hanko-ca passes `nisshi validate --logs` (ADR 0007).
+# files, with neither a reload nor a restart from hanko (ADR 0013). Both CAs come from `hanko ca keygen`. Every line of hanko and hanko-ca passes `nisshi validate --logs` (ADR 0007).
 #
 # The overlay is the test's VM network: kekkai is not a dependency of hanko's test. A host's
 # address on it stands for its kekkai overlay address, the attested source address hanko-ca
@@ -23,22 +23,13 @@ let
   # seven minutes after issuance, which leaves the subtests before the timer's time to run.
   lifetime = "16m";
 
-  # The CA and the next one of a rotation (ADR 0012); in production the key comes from sops.
-  caMaterial = pkgs.runCommand "hanko-test-ca" { nativeBuildInputs = [ pkgs.openssl ]; } ''
+  # The CA and the next one of a rotation (ADR 0012), made by `hanko ca keygen` (ADR 0014
+  # amendment) as the deployment makes them; in production the key goes to sops, not the store.
+  caMaterial = pkgs.runCommand "hanko-test-ca" { } ''
     mkdir $out
-    cat > ext.cnf <<EOF
-    [req]
-    distinguished_name = dn
-    x509_extensions = v3
-    [dn]
-    [v3]
-    basicConstraints = critical,CA:TRUE
-    keyUsage = critical,keyCertSign
-    subjectKeyIdentifier = hash
-    EOF
     for n in ca next; do
-      openssl ecparam -name prime256v1 -genkey -noout -out $out/$n.key
-      openssl req -x509 -new -config ext.cnf -key $out/$n.key -subj /CN=hanko-test-$n -days 3650 -out $out/$n.pem
+      ${lib.getExe' self.packages.${pkgs.stdenv.hostPlatform.system}.hanko "hanko"} ca keygen \
+        --name hanko-test-$n --days 3650 --cert $out/$n.pem > $out/$n.key
     done
   '';
 
@@ -147,6 +138,9 @@ pkgs.testers.runNixOSTest {
               out = m.succeed("openssl x509 -noout -ext subjectAltName,extendedKeyUsage -in /var/lib/hanko/svc/svid.pem")
               assert f"URI:{me}" in out and "DNS:" not in out and "TLS Web Client Authentication" in out, out
               m.succeed("openssl verify -CAfile /var/lib/hanko/svc/bundle.pem /var/lib/hanko/svc/svid.pem")
+              # The CA of `hanko ca keygen`: it signs SVIDs only, never an intermediate.
+              out = m.succeed("openssl x509 -noout -subject -ext basicConstraints,keyUsage -in /var/lib/hanko/svc/bundle.pem")
+              assert "CN=hanko-test-ca" in out and "pathlen:0" in out and "Certificate Sign" in out and "Digital Signature" not in out, out
               m.succeed("runuser -u svc -- cat /var/lib/hanko/svc/key.pem >/dev/null")
               m.fail("runuser -u nobody -- cat /var/lib/hanko/svc/key.pem")
               m.succeed("systemctl start svc.service")
