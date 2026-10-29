@@ -33,7 +33,6 @@
     certificates.api = {
       issuer = "internal";
       spiffeId = "spiffe://uchi.example.org/vm/api";
-      reload = [ "api.service" ];
       group = "api";
     };
   };

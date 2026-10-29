@@ -2,8 +2,8 @@
 # a service `svc` holding an X.509-SVID for `spiffe://uchi.example.org/<host>/svc`. The services
 # authenticate each other by SPIFFE ID over mutual TLS; an ID not allowed for the caller's address
 # is refused; a run with nothing due still refreshes the bundle (rotation step (a) of ADR 0012 adds
-# a second CA); the timer renews both SVIDs and both services serve the new ones after a reload,
-# never a restart. Every line of hanko and hanko-ca passes `nisshi validate --logs` (ADR 0007).
+# a second CA); the timer renews both SVIDs and both services serve the new ones, read from their
+# files, with neither a reload nor a restart from hanko (ADR 0013). Every line of hanko and hanko-ca passes `nisshi validate --logs` (ADR 0007).
 #
 # The overlay is the test's VM network: kekkai is not a dependency of hanko's test. A host's
 # address on it stands for its kekkai overlay address, the attested source address hanko-ca
@@ -55,7 +55,6 @@ let
         certificates.svc = {
           issuer = "internal";
           spiffeId = id name;
-          reload = [ "svc.service" ];
           group = "svc";
         };
       };
@@ -73,7 +72,6 @@ let
         User = "svc";
         Group = "svc";
         ExecStart = "${python} ${svc} serve ${id peer}";
-        ExecReload = "${pkgs.coreutils}/bin/kill -HUP $MAINPID";
       };
       networking.firewall.allowedTCPPorts = [ 8443 ];
     };
@@ -188,7 +186,7 @@ pkgs.testers.runNixOSTest {
           for m, _, _, peer_id, peer_ip in hosts:
               call(m, peer_id, peer_ip)
 
-      with subtest("the timer renews both SVIDs and the services serve them without a restart"):
+      with subtest("the timer renews both SVIDs and the services serve them, no reload, no restart"):
           pids = {m.name: m.succeed("systemctl show -P MainPID svc.service") for m, *_ in hosts}
           served = {m.name: call(m, peer_id, peer_ip) for m, _, _, peer_id, peer_ip in hosts}
           for m, *_ in hosts:
@@ -202,9 +200,14 @@ pkgs.testers.runNixOSTest {
           for m, *_ in hosts:
               assert m.succeed("systemctl show -P MainPID svc.service") == pids[m.name]
               assert m.succeed("systemctl show -P NRestarts svc.service").strip() == "0"
-              assert "reloaded" in m.succeed("journalctl --no-pager -u svc.service")
-              out = m.succeed(journal("hanko-renew.service"))
+              # svc picked the files up itself; systemd never reloaded it and hanko sent nothing.
+              out = m.succeed("journalctl --no-pager -u svc.service")
+              assert "files-changed" in out and "Reloading" not in out and "Reloaded" not in out, out
+              out = m.succeed(journal("hanko-renew.service")) + m.succeed(journal("hanko.service"))
               assert '"reason":"less than half of its lifetime left"' in out, out
+              assert '"event":"reload-' not in out, out
+              # No polkit rule: hanko could not reload or restart svc if it tried (ADR 0005).
+              m.fail("test -e /etc/polkit-1/rules.d/10-nixos.rules && grep -q hanko /etc/polkit-1/rules.d/10-nixos.rules")
               m.succeed("openssl verify -CAfile /var/lib/hanko/svc/bundle.pem /var/lib/hanko/svc/svid.pem")
 
       with subtest("hanko status shows the SVID and the expiry of the CA that signed it"):

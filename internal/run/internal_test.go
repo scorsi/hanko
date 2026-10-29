@@ -3,7 +3,6 @@ package run
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"os"
 	"path/filepath"
 	"slices"
@@ -20,11 +19,11 @@ import (
 
 const idAPI = "spiffe://uchi.example.org/vm/api"
 
-var api = config.Certificate{Name: "api", Group: strconv.Itoa(os.Getegid()), Issuer: "internal", SpiffeID: idAPI, Reload: []string{"api.service"}}
+var api = config.Certificate{Name: "api", Group: strconv.Itoa(os.Getegid()), Issuer: "internal", SpiffeID: idAPI}
 
-// internalSetup is a state directory with the api certificate directory and a runner whose
-// reloads check that svid.pem, key.pem and bundle.pem are in place.
-func internalSetup(t *testing.T, addr string) (*Runner, *bytes.Buffer, *[]string) {
+// internalSetup is a state directory with the api certificate directory and a runner that
+// fails the test on any reload: consumers of internal certificates reload themselves (ADR 0013).
+func internalSetup(t *testing.T, addr string) (*Runner, *bytes.Buffer) {
 	state := testutil.StateDir(t)
 	dir := filepath.Join(state, "api")
 	if err := os.Mkdir(dir, 0o750); err != nil {
@@ -32,18 +31,12 @@ func internalSetup(t *testing.T, addr string) (*Runner, *bytes.Buffer, *[]string
 	}
 	testutil.SetgidDir(t, dir)
 	var log bytes.Buffer
-	var reloads []string
 	r := &Runner{Internal: &svid.Client{Addr: addr}, StateDir: state, Log: logging.New(&log, nil)}
 	r.Reload = func(_ context.Context, unit string) error {
-		s, _ := os.ReadFile(filepath.Join(dir, "svid.pem"))
-		b, _ := os.ReadFile(filepath.Join(dir, "bundle.pem"))
-		if _, err := tls.LoadX509KeyPair(filepath.Join(dir, "svid.pem"), filepath.Join(dir, "key.pem")); err != nil || svid.Due(s, b, idAPI, time.Now()) != "" {
-			t.Errorf("reload of %s before the files were in place: %v", unit, err)
-		}
-		reloads = append(reloads, unit)
+		t.Errorf("reload of %s for an internal certificate", unit)
 		return nil
 	}
-	return r, &log, &reloads
+	return r, &log
 }
 
 func read(t *testing.T, r *Runner, name string) []byte {
@@ -61,7 +54,7 @@ func read(t *testing.T, r *Runner, name string) []byte {
 func TestInternal(t *testing.T) {
 	ctx := context.Background()
 	key, cert := testutil.CACert(t, time.Now().Add(365*24*time.Hour))
-	r, log, reloads := internalSetup(t, testutil.ServeCA(t, key, cert, "24h", idAPI))
+	r, log := internalSetup(t, testutil.ServeCA(t, key, cert, "24h", idAPI))
 	if err := r.Run(ctx, []config.Certificate{api}); err != nil {
 		t.Fatal(err)
 	}
@@ -74,22 +67,22 @@ func TestInternal(t *testing.T) {
 		t.Fatalf(".reload-pending left: %v", err)
 	}
 	first := read(t, r, "svid.pem")
-	if !bytes.Equal(read(t, r, "bundle.pem"), cert) || !slices.Equal(*reloads, []string{"api.service"}) ||
+	if !bytes.Equal(read(t, r, "bundle.pem"), cert) ||
 		!strings.Contains(log.String(), `"event":"certificate-renewing","certificate":"api","reason":"absent","spiffe_id":"`+idAPI+`"`) {
-		t.Fatalf("first run: reloads %v, log %s", *reloads, log)
+		t.Fatalf("first run: log %s", log)
 	}
 
-	// Nothing due, same bundle: no request but Bundle, no reload.
+	// Nothing due, same bundle: no request but Bundle.
 	log.Reset()
 	if err := r.Run(ctx, []config.Certificate{api}); err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(read(t, r, "svid.pem"), first) || len(*reloads) != 1 || !strings.Contains(log.String(), `"event":"certificate-valid"`) ||
+	if !bytes.Equal(read(t, r, "svid.pem"), first) || !strings.Contains(log.String(), `"event":"certificate-valid"`) ||
 		strings.Contains(log.String(), "bundle-written") {
-		t.Fatalf("idle run: reloads %v, log %s", *reloads, log)
+		t.Fatalf("idle run: log %s", log)
 	}
 
-	// Rotation (a): the next CA joins cert_file. The bundle alone changes and is delivered.
+	// Rotation (a): the next CA joins cert_file. The bundle alone changes and is written.
 	nextKey, next := testutil.CACert(t, time.Now().Add(2*365*24*time.Hour))
 	r.Internal = &svid.Client{Addr: testutil.ServeCA(t, key, append(slices.Clip(cert), next...), "24h", idAPI)}
 	log.Reset()
@@ -97,8 +90,8 @@ func TestInternal(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(read(t, r, "svid.pem"), first) || !bytes.Equal(read(t, r, "bundle.pem"), append(slices.Clip(cert), next...)) ||
-		len(*reloads) != 2 || !strings.Contains(log.String(), `"event":"bundle-written","certificate":"api"`) {
-		t.Fatalf("new bundle: reloads %v, log %s", *reloads, log)
+		!strings.Contains(log.String(), `"event":"bundle-written","certificate":"api"`) {
+		t.Fatalf("new bundle: log %s", log)
 	}
 
 	// (b): the next key signs; the old SVID still verifies against the old CA in the bundle.
@@ -138,7 +131,7 @@ func TestInternal(t *testing.T) {
 // a stale bundle is noticed (OnFailure); the files stay.
 func TestInternalUnreachable(t *testing.T) {
 	key, cert := testutil.CACert(t, time.Now().Add(365*24*time.Hour))
-	r, _, _ := internalSetup(t, testutil.ServeCA(t, key, cert, "24h", idAPI))
+	r, _ := internalSetup(t, testutil.ServeCA(t, key, cert, "24h", idAPI))
 	if err := r.Run(context.Background(), []config.Certificate{api}); err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +149,7 @@ func TestInternalUnreachable(t *testing.T) {
 // status warns that the CA expires soon.
 func TestInternalNearCAEnd(t *testing.T) {
 	key, cert := testutil.CACert(t, time.Now().Add(10*time.Minute))
-	r, log, _ := internalSetup(t, testutil.ServeCA(t, key, cert, "24h", idAPI))
+	r, log := internalSetup(t, testutil.ServeCA(t, key, cert, "24h", idAPI))
 	for range 2 {
 		if err := r.Run(context.Background(), []config.Certificate{api}); err != nil {
 			t.Fatal(err)
@@ -174,7 +167,7 @@ func TestInternalNearCAEnd(t *testing.T) {
 
 func TestInternalStatus(t *testing.T) {
 	key, cert := testutil.CACert(t, time.Now().Add(365*24*time.Hour))
-	r, _, _ := internalSetup(t, testutil.ServeCA(t, key, cert, "24h", idAPI))
+	r, _ := internalSetup(t, testutil.ServeCA(t, key, cert, "24h", idAPI))
 	if err := r.Run(context.Background(), []config.Certificate{api}); err != nil {
 		t.Fatal(err)
 	}

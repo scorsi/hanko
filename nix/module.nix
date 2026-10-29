@@ -184,7 +184,10 @@ in
               type = types.listOf types.str;
               default = [ ];
               example = [ "genkan.service" ];
-              description = "Units reloaded after the certificate changed.";
+              description = ''
+                Units reloaded after an `acme` certificate changed. An `internal` certificate takes
+                none: its consumers watch their files and reload in-process (ADR 0013).
+              '';
             };
             group = mkOption {
               type = types.str;

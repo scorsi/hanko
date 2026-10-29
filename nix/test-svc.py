@@ -1,14 +1,21 @@
 # The v1 nixosTest's service (nix/test-internal.nix): mutual TLS with hanko's X.509-SVID,
-# authorising the peer on its SPIFFE ID, the single URI SAN (ADR 0004). It reads its files at
-# start and again on SIGHUP, hanko's reload, so a new SVID is served without a restart.
+# authorising the peer on its SPIFFE ID, the single URI SAN (ADR 0004). hanko sends it nothing
+# (ADR 0013): the server re-reads its files when one changed, checked before every handshake, so
+# a new SVID or bundle is served without a reload or a restart.
 #   serve PEER_ID            accept on :8443, answer "hello" to PEER_ID only
 #   call PEER_ID ADDRESS     connect, require PEER_ID, print the server's serial and answer
-import signal
+import os
 import socket
 import ssl
 import sys
 
 DIR = "/var/lib/hanko/svc"
+FILES = [f"{DIR}/{f}.pem" for f in ("svid", "key", "bundle")]
+
+
+def stamp():
+    """Inode and mtime of the files: hanko renames new files into place."""
+    return [(s.st_ino, s.st_mtime_ns) for s in map(os.stat, FILES)]
 
 
 def context(side):
@@ -29,17 +36,18 @@ def peer(tls):
 
 mode, peer_id = sys.argv[1], sys.argv[2]
 if mode == "serve":
-    ctx = context(ssl.PROTOCOL_TLS_SERVER)
-
-    def reload(*_):
-        global ctx
-        ctx = context(ssl.PROTOCOL_TLS_SERVER)
-        print("reloaded", flush=True)
-
-    signal.signal(signal.SIGHUP, reload)
+    seen, ctx = stamp(), context(ssl.PROTOCOL_TLS_SERVER)
     server = socket.create_server(("", 8443))
     while True:
         conn, _ = server.accept()
+        try:
+            if (now := stamp()) != seen:
+                # Between hanko's renames the new SVID may meet the old key: keep the previous
+                # context and try again on the next handshake.
+                ctx, seen = context(ssl.PROTOCOL_TLS_SERVER), now
+                print("files-changed", flush=True)
+        except (OSError, ssl.SSLError) as e:
+            print("kept previous files:", e, flush=True)
         try:
             with ctx.wrap_socket(conn, server_side=True) as tls:
                 got, _ = peer(tls)

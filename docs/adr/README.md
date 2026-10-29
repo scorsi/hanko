@@ -16,3 +16,4 @@ MADR-lite, as in annai: one decision per file, `NNNN-slug.md`, sections Context 
 | [0010](0010-acme-retry-deadlines.md) | Persist CA retry deadlines across oneshots |
 | [0011](0011-status.md) | `hanko status` and the persisted last run result |
 | [0012](0012-ca-rotation.md) | CA rotation for `hanko-ca` (proposed) |
+| [0013](0013-consumers-reload-internal-certificates.md) | Consumers reload internal certificates themselves (Accepted — 2026-10-29) |

@@ -64,3 +64,10 @@ Details the implementation fixed within the decision above, with two owner decis
 - **Validity**: `NotBefore` is one minute in the past for clock differences between hosts, `NotAfter` is the earlier of `NotBefore` plus `svid_lifetime` and the signing CA certificate's `NotAfter`: an SVID never outlives its CA (owner decision). The serial is random. Once the CA certificate has expired, `Sign` is refused (`FailedPrecondition`, logged); `Bundle()` still answers.
 - **Server limits**: requests of at most 8 KiB (a CSR and an ID), 4 concurrent RPCs per connection, 64 concurrent connections in all, 5 s to set a connection up, idle connections closed after 30 s and every connection (so every RPC) after at most 70 s (one minute plus 10 s of grace). The callers are a few oneshots making one short connection per certificate.
 - **Configuration checks** (`hanko-ca check`, run by the module at build time without the key): absolute paths, `listen` a specific IP with a port above 1024 (ADR-0005), no IPv4-mapped IPv6 form in `listen` or `hosts` (an IPv4 address is written as IPv4, as callers are compared unmapped, and `[::ffff:0.0.0.0]` is a wildcard), duplicate addresses refused, every ID `spiffe://<trust domain>/<host>/<service>` with the SPIFFE character rules, one trust domain for all IDs (no federation). At start the key must be ECDSA P-256 and match one CA certificate of `cert_file`, and that certificate must be valid now and carry `keyUsage keyCertSign`.
+
+## 2026-10-29: delivery changed by ADR-0013
+
+hanko no longer reloads or restarts the consumers of an SVID: it writes the files atomically and
+each consumer re-reads them in-process when they change
+([ADR-0013](0013-consumers-reload-internal-certificates.md)). The "Files per certificate" and
+"Lifetime" bullets above are read with that change.

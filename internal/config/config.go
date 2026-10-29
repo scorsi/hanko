@@ -161,6 +161,9 @@ func (c *Config) validate() error {
 			if len(cert.Hosts) != 0 {
 				add("%s: hosts belong to the acme issuer, not internal", at)
 			}
+			if len(cert.Reload) != 0 {
+				add("%s: reload belongs to the acme issuer: consumers of internal certificates reload their files themselves (ADR 0013)", at)
+			}
 		default:
 			add("%s: unknown issuer (want acme or internal)", at)
 		}

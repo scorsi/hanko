@@ -217,13 +217,7 @@ func (r *Runner) one(ctx context.Context, root *os.Root, c config.Certificate) (
 		renewed = true
 	}
 	if internal && !bytes.Equal(bundle, newBundle) {
-		// A new bundle alone is delivered like a certificate: intent first, then reloads.
-		if pending == nil {
-			if err := state.WriteFiles(dir, 0o600, state.File{Name: ".reload-pending", Data: []byte("pending\n")}); err != nil {
-				return false, err
-			}
-			pending = []byte("pending")
-		}
+		// Consumers watch their files (ADR 0013): the atomic write is the whole delivery.
 		if err := state.WriteFiles(dir, 0o640, state.File{Name: "bundle.pem", Data: newBundle}); err != nil {
 			return false, err
 		}

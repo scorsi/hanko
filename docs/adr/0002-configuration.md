@@ -43,7 +43,6 @@ reload = ["genkan.service"]
 name = "api"
 issuer = "internal"
 spiffe_id = "spiffe://uchi.example.org/vm/api"
-reload = ["api.service"]
 ```
 
 - A certificate's `name` is the directory under the state directory where its files land (ADR-0005). Names are unique, lowercase `[a-z0-9-]`.
@@ -74,3 +73,9 @@ services.hanko = {
 
 - A unit test deserialises the complete example; the `nixosTest` proves the module's output passes `hanko check`.
 - The file is the contract between the module and the binary; `check`'s messages document it.
+
+## Amendment 2026-10-29: no `reload` on internal certificates
+
+`reload` belongs to `acme` certificates only; `check` refuses it on an `internal` one, whose
+consumers reload their files themselves ([ADR-0013](0013-consumers-reload-internal-certificates.md)).
+The example above lost its `api` reload accordingly.
