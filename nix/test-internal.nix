@@ -48,7 +48,7 @@ let
     {
       imports = [ self.nixosModules.default ];
       environment.systemPackages = [ pkgs.openssl ];
-      services.hanko = {
+      services.hanko-node = {
         enable = true;
         timer = "minutely";
         internal.ca = "${nodes.ca.networking.primaryIPAddress}:4900";
@@ -59,8 +59,8 @@ let
         };
       };
       # The timer starts in the rotation subtest only, without its random delay.
-      systemd.timers.hanko.wantedBy = lib.mkForce [ ];
-      systemd.timers.hanko.timerConfig.RandomizedDelaySec = lib.mkForce 0;
+      systemd.timers.hanko-node.wantedBy = lib.mkForce [ ];
+      systemd.timers.hanko-node.timerConfig.RandomizedDelaySec = lib.mkForce 0;
 
       # The service: its own user and group (ADR 0005), started by the test once its files exist.
       users.users.svc = {
@@ -111,9 +111,10 @@ pkgs.testers.runNixOSTest {
       alpha_ip = "${nodes.alpha.networking.primaryIPAddress}"
       beta_ip = "${nodes.beta.networking.primaryIPAddress}"
       alpha_id, beta_id = "${id "alpha"}", "${id "beta"}"
-      hanko_bin = "${lib.getExe nodes.alpha.services.hanko.package}"
-      as_hanko = f"runuser -u hanko -- env STATE_DIRECTORY=/var/lib/hanko {hanko_bin}"
-      start_renew = "systemctl reset-failed hanko-renew.service; systemctl start hanko-renew.service"
+      # hanko-node runs, hanko reports (ADR 0014); both as user hanko (ADR 0011).
+      node_bin = "${lib.getExe' nodes.alpha.services.hanko-node.package "hanko-node"}"
+      as_hanko = "runuser -u hanko -- env STATE_DIRECTORY=/var/lib/hanko ${lib.getExe' nodes.alpha.services.hanko-node.package "hanko"}"
+      start_renew = "systemctl reset-failed hanko-node-renew.service; systemctl start hanko-node-renew.service"
       hosts = [(alpha, alpha_id, beta, beta_id, beta_ip), (beta, beta_id, alpha, alpha_id, alpha_ip)]
 
       def journal(unit: str) -> str:
@@ -166,7 +167,7 @@ pkgs.testers.runNixOSTest {
               f'[[certificates]]\nname = "svc"\nissuer = "internal"\ngroup = "root"\nspiffe_id = "{beta_id}"\n'
               "EOF",
           )
-          out = alpha.fail(f"STATE_DIRECTORY=/root/stolen {hanko_bin} run /root/stolen.toml 2>&1")
+          out = alpha.fail(f"STATE_DIRECTORY=/root/stolen {node_bin} run /root/stolen.toml 2>&1")
           assert '"event":"certificate-failed","certificate":"svc"' in out and "PermissionDenied" in out, out
           alpha.fail("test -e /root/stolen/svc/svid.pem")
           out = ca.succeed(journal("hanko-ca.service"))
@@ -178,7 +179,7 @@ pkgs.testers.runNixOSTest {
           for m, _, _, peer_id, peer_ip in hosts:
               before = m.succeed("sha256sum < /var/lib/hanko/svc/svid.pem")
               m.succeed(start_renew)
-              out = invocation(m, "hanko-renew.service")
+              out = invocation(m, "hanko-node-renew.service")
               assert '"event":"certificate-valid","certificate":"svc"' in out and '"event":"bundle-written","certificate":"svc"' in out, out
               assert m.succeed("sha256sum < /var/lib/hanko/svc/svid.pem") == before
               assert m.succeed("grep -c 'BEGIN CERTIFICATE' /var/lib/hanko/svc/bundle.pem").strip() == "2"
@@ -190,7 +191,7 @@ pkgs.testers.runNixOSTest {
           pids = {m.name: m.succeed("systemctl show -P MainPID svc.service") for m, *_ in hosts}
           served = {m.name: call(m, peer_id, peer_ip) for m, _, _, peer_id, peer_ip in hosts}
           for m, *_ in hosts:
-              m.succeed("systemctl start hanko.timer")
+              m.succeed("systemctl start hanko-node.timer")
           for m, _, _, peer_id, peer_ip in hosts:
               # A failed call must not pass for a new serial.
               m.wait_until_succeeds(
@@ -203,7 +204,7 @@ pkgs.testers.runNixOSTest {
               # svc picked the files up itself; systemd never reloaded it and hanko sent nothing.
               out = m.succeed("journalctl --no-pager -u svc.service")
               assert "files-changed" in out and "Reloading" not in out and "Reloaded" not in out, out
-              out = m.succeed(journal("hanko-renew.service")) + m.succeed(journal("hanko.service"))
+              out = m.succeed(journal("hanko-node-renew.service")) + m.succeed(journal("hanko-node.service"))
               assert '"reason":"less than half of its lifetime left"' in out, out
               assert '"event":"reload-' not in out, out
               # No polkit rule: hanko could not reload or restart svc if it tried (ADR 0005).
@@ -219,9 +220,9 @@ pkgs.testers.runNixOSTest {
       with subtest("every line hanko and hanko-ca wrote passes the log schema (ADR 0007)"):
           # Empty input passes the validator: first prove the events are there.
           for m, unit, events in [
-              (alpha, "hanko-renew.service", ["certificate-renewing", "certificate-written", "certificate-valid", "bundle-written", "run-completed"]),
-              (beta, "hanko-renew.service", ["certificate-written", "bundle-written", "run-completed"]),
-              (alpha, "hanko.service", ["run-completed"]),
+              (alpha, "hanko-node-renew.service", ["certificate-renewing", "certificate-written", "certificate-valid", "bundle-written", "run-completed"]),
+              (beta, "hanko-node-renew.service", ["certificate-written", "bundle-written", "run-completed"]),
+              (alpha, "hanko-node.service", ["run-completed"]),
               (ca, "hanko-ca.service", ["ca-started", "svid-signed", "sign-refused"]),
           ]:
               out = m.succeed(journal(unit))

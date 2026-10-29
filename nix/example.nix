@@ -1,9 +1,9 @@
-# Sample configuration for the module checks in flake.nix: the examples of ADR 0002 (hanko) and
+# Sample configuration for the module checks in flake.nix: the examples of ADR 0002 (hanko-node) and
 # ADR 0004 (hanko-ca), in module form.
 {
   system.stateVersion = "26.05";
 
-  services.hanko = {
+  services.hanko-node = {
     enable = true;
     acme = {
       directory = "https://acme-staging-v02.api.letsencrypt.org/directory";

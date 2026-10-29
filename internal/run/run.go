@@ -55,7 +55,7 @@ type Runner struct {
 // not be obtained or delivered. The error matches issuer.ErrNoQuickRetry when any certificate
 // failed for a reason a retry within minutes cannot fix (noQuickRetry), even if another one only
 // needs hanko-ca or the network to come up: a quick retry would order that first one again. Pending reloads survive a crash and are retried without an order.
-// A blocking flock on <state>/.lock serialises runs, so hanko.service and hanko-renew.service
+// A blocking flock on <state>/.lock serialises runs, so hanko-node.service and hanko-node-renew.service
 // never overlap (e.g. a persistent timer catching up at boot): the second waits, then finds
 // nothing due.
 func (r *Runner) Run(ctx context.Context, certs []config.Certificate) error {
@@ -307,7 +307,7 @@ var ErrInactive = errors.New("unit not active")
 
 // Systemctl reloads unit, restarting it when it cannot reload (no ExecReload); allowed for
 // user hanko by the module's polkit rule (ADR 0005). A unit that is not active is skipped
-// (ErrInactive): at boot a consumer ordered After=hanko.service has a start job queued behind
+// (ErrInactive): at boot a consumer ordered After=hanko-node.service has a start job queued behind
 // hanko, a reload would merge into it and wait for hanko; it reads the new files when it starts.
 // show only reads properties, which needs no polkit authorisation.
 func Systemctl(ctx context.Context, unit string) error {

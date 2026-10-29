@@ -4,7 +4,7 @@ The certificate service of the homelab: it makes certificates available to
 services. Public ones from Let's Encrypt today, internal service identities in
 the SPIFFE model later. Named after the seal stamped on documents.
 
-Status: `hanko check`, `hanko run` (ACME issuer, M1) and `hanko status` (M3) implemented, and v1's `hanko-ca` signer and `internal` issuer; not yet in production. Decisions live in
+Status: `hanko-node check|run` (ACME issuer, M1) and `hanko status` (M3) implemented, and v1's `hanko-ca` signer and `internal` issuer; not yet in production. Decisions live in
 [`docs/adr/`](docs/adr/), the plan in [`docs/milestones.md`](docs/milestones.md).
 
 ## Where it sits
@@ -20,7 +20,7 @@ Four products, one domain each, no shared code between them:
 
 ## Shape
 
-- **`hanko`**, a per-host oneshot run by a systemd timer and at every `switch`
+- **`hanko-node`**, a per-host oneshot run by a systemd timer and at every `switch`
   that changes its configuration; writes files, reloads the units it is told
   to, listens on nothing (ADR 0001). Go, stdlib first. A failed run at boot or
   `switch` is retried every 30 s, at most four times an hour. Exit codes: 0
@@ -28,7 +28,9 @@ Four products, one domain each, no shared code between them:
   or annai not up yet), 10 a failure a quick retry cannot fix (ACME validation
   or CA error, CA retry deadline, hanko-ca refusal), never retried before the
   next timer run; 10 wins when a run has both, 2 a usage error. Units that read
-  certificates declare `after` and `wants` `hanko.service`, never `requires`.
+  certificates declare `after` and `wants` `hanko-node.service`, never `requires`.
+- **`hanko`**, the operator CLI: `hanko status` reports every certificate, run
+  as user `hanko`; `hanko check` validates a configuration (ADR 0011, ADR 0014).
 - **ACME issuer**: DNS-01 only, RFC 2136 with TSIG against every annai `soto`
   nameserver, propagation checked by asking each one by address (ADR 0003).
 - **Internal issuer**, v1: SPIFFE IDs under the internal zone, X.509-SVIDs of

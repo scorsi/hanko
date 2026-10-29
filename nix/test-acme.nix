@@ -4,7 +4,7 @@
 # nameservers serve the TXT to hanko's propagation check), the files' group and modes, the reload,
 # that a second run and the timer's twin renew nothing, that a concurrent run waits for the lock,
 # and that a run renews once a third of Pebble's short certificate validity is left. A second
-# consumer ordered After=hanko.service proves the boot run skips a unit that is not active yet
+# consumer ordered After=hanko-node.service proves the boot run skips a unit that is not active yet
 # instead of stalling on its queued start job (ADR 0005), and is reloaded by the later renewal.
 # Every line both units wrote passes `nisshi validate --logs` (ADR 0007).
 {
@@ -107,7 +107,7 @@ pkgs.testers.runNixOSTest {
           pkgs.bind
         ];
 
-        services.hanko = {
+        services.hanko-node = {
           enable = true;
           # The test overrides this briefly to prove an actual timer firing.
           timer = "*-12-31 23:59:59";
@@ -144,7 +144,7 @@ pkgs.testers.runNixOSTest {
             group = "consumer";
           };
         };
-        specialisation.extra-certificate.configuration.services.hanko.certificates.extra = {
+        specialisation.extra-certificate.configuration.services.hanko-node.certificates.extra = {
           hosts = [ "extra.example.org" ];
           reload = [ "consumer.service" ];
           group = "consumer";
@@ -164,8 +164,8 @@ pkgs.testers.runNixOSTest {
         systemd.services.consumer = {
           wantedBy = [ "multi-user.target" ];
           # Active before hanko's boot run reloads it; it reads no file at start. (A real consumer
-          # orders itself After=hanko.service, ADR 0001.)
-          before = [ "hanko.service" ];
+          # orders itself After=hanko-node.service, ADR 0001.)
+          before = [ "hanko-node.service" ];
           serviceConfig = {
             User = "consumer";
             Group = "consumer";
@@ -178,7 +178,7 @@ pkgs.testers.runNixOSTest {
         # must skip it rather than queue a reload behind that job.
         systemd.services.late = {
           wantedBy = [ "multi-user.target" ];
-          after = [ "hanko.service" ];
+          after = [ "hanko-node.service" ];
           serviceConfig = {
             User = "consumer";
             Group = "consumer";
@@ -204,7 +204,9 @@ pkgs.testers.runNixOSTest {
       }
       third = ${toString validity} // 3
       # The binary as the state directory's owner, outside the units (status reads as hanko).
-      as_hanko = "runuser -u hanko -- env STATE_DIRECTORY=/var/lib/hanko ${lib.getExe nodes.hanko.services.hanko.package}"
+      # hanko-node runs, hanko reports (ADR 0014); both as user hanko (ADR 0011).
+      as_node = "runuser -u hanko -- env STATE_DIRECTORY=/var/lib/hanko ${lib.getExe' nodes.hanko.services.hanko-node.package "hanko-node"}"
+      as_hanko = "runuser -u hanko -- env STATE_DIRECTORY=/var/lib/hanko ${lib.getExe' nodes.hanko.services.hanko-node.package "hanko"}"
 
       def journal(unit: str) -> str:
           """hanko's own lines only: `-u` would add PID 1's "Started …", which is not JSON."""
@@ -213,7 +215,7 @@ pkgs.testers.runNixOSTest {
       def journals() -> str:
           return "\n".join(
               m.execute(f"journalctl --no-pager -u {u}")[1]
-              for m, u in [(hanko, "hanko.service"), (hanko, "hanko-renew.service"), (soto1, "annai.service"), (soto2, "annai.service"), (acme, "pebble.service")]
+              for m, u in [(hanko, "hanko-node.service"), (hanko, "hanko-node-renew.service"), (soto1, "annai.service"), (soto2, "annai.service"), (acme, "pebble.service")]
           )
 
       def fingerprints() -> dict[str, str]:
@@ -224,12 +226,12 @@ pkgs.testers.runNixOSTest {
 
       # Back-to-back failing starts would trip systemd's start rate limit (5 per 10 s), after
       # which a valid restore still fails with start-limit-hit without running hanko.
-      start_renew = "systemctl reset-failed hanko-renew.service; systemctl start hanko-renew.service"
+      start_renew = "systemctl reset-failed hanko-node-renew.service; systemctl start hanko-node-renew.service"
 
       def run_renew() -> str:
           """Starts the timer's twin, waits for it, returns its journal."""
           hanko.succeed(start_renew)
-          return hanko.succeed(journal("hanko-renew.service"))
+          return hanko.succeed(journal("hanko-node-renew.service"))
 
       def wait_capture(soto: QemuMachine) -> None:
           """Waits for tcpdump to listen; fails at once, with its status and output, if it died."""
@@ -263,19 +265,19 @@ pkgs.testers.runNixOSTest {
       with subtest("the boot run issues both certificates"):
           # Started only now: its boot run's TXT queries must reach captures already listening.
           hanko.start()
-          hanko.wait_until_succeeds("systemctl show -P ActiveState hanko.service | grep -qxE 'active|failed'", timeout=600)
-          state = hanko.succeed("systemctl show -P ActiveState hanko.service").strip()
+          hanko.wait_until_succeeds("systemctl show -P ActiveState hanko-node.service | grep -qxE 'active|failed'", timeout=600)
+          state = hanko.succeed("systemctl show -P ActiveState hanko-node.service").strip()
           assert state == "active", journals()
           for c in certs:
               hanko.succeed(f"test -s /var/lib/hanko/{c}/fullchain.pem -a -s /var/lib/hanko/{c}/key.pem")
 
       with subtest("the boot run skips the consumer ordered after it, without waiting for it"):
           hanko.wait_for_unit("late.service")
-          start, end = (int(hanko.succeed(f"systemctl show -P {p} hanko.service")) for p in ["ExecMainStartTimestampMonotonic", "ExecMainExitTimestampMonotonic"])
-          print(f"hanko.service boot run: {(end - start) / 1e6:.1f} s")
+          start, end = (int(hanko.succeed(f"systemctl show -P {p} hanko-node.service")) for p in ["ExecMainStartTimestampMonotonic", "ExecMainExitTimestampMonotonic"])
+          print(f"hanko-node.service boot run: {(end - start) / 1e6:.1f} s")
           # The order timeout a stalled reload would hit is 600 s; issuing both certificates takes far less.
           assert 0 < end - start < 300_000_000, journals()
-          out = hanko.succeed(journal("hanko.service"))
+          out = hanko.succeed(journal("hanko-node.service"))
           print(out)
           assert '"event":"reload-skipped","certificate":"home","unit":"late.service"' in out, out
           assert '"event":"reload-failed"' not in out, out
@@ -323,20 +325,20 @@ pkgs.testers.runNixOSTest {
           hanko.succeed(f"openssl x509 -noout -checkend {third + 5} -in /var/lib/hanko/{c}/fullchain.pem")
 
       with subtest("a second run renews nothing"):
-          hanko.succeed("systemctl restart hanko.service")
+          hanko.succeed("systemctl restart hanko-node.service")
           assert fingerprints() == before and reloads() == 2 and reloads("late") == 0, journals()
 
       with subtest("a real timer tick runs the twin and renews nothing"):
           hanko.succeed(
-              "mkdir -p /run/systemd/system/hanko.timer.d",
-              "printf '[Timer]\nOnActiveSec=1s\nRandomizedDelaySec=0\nAccuracySec=1us\n' > /run/systemd/system/hanko.timer.d/test.conf",
+              "mkdir -p /run/systemd/system/hanko-node.timer.d",
+              "printf '[Timer]\nOnActiveSec=1s\nRandomizedDelaySec=0\nAccuracySec=1us\n' > /run/systemd/system/hanko-node.timer.d/test.conf",
               "systemctl daemon-reload",
-              "systemctl restart hanko.timer",
+              "systemctl restart hanko-node.timer",
           )
-          hanko.wait_until_succeeds(journal("hanko-renew.service") + " | grep -q run-completed", timeout=30)
-          hanko.wait_until_succeeds("systemctl show -P ActiveState hanko-renew.service | grep -qx inactive", timeout=30)
-          hanko.succeed("systemctl stop hanko.timer; rm /run/systemd/system/hanko.timer.d/test.conf; systemctl daemon-reload")
-          out = hanko.succeed(journal("hanko-renew.service"))
+          hanko.wait_until_succeeds(journal("hanko-node-renew.service") + " | grep -q run-completed", timeout=30)
+          hanko.wait_until_succeeds("systemctl show -P ActiveState hanko-node-renew.service | grep -qx inactive", timeout=30)
+          hanko.succeed("systemctl stop hanko-node.timer; rm /run/systemd/system/hanko-node.timer.d/test.conf; systemctl daemon-reload")
+          out = hanko.succeed(journal("hanko-node-renew.service"))
           assert out.count('"event":"certificate-valid"') == 2 and '"event":"certificate-renewing"' not in out, out
           assert fingerprints() == before and reloads() == 2 and reloads("late") == 0, journals()
 
@@ -344,12 +346,12 @@ pkgs.testers.runNixOSTest {
           hanko.succeed("systemd-run --unit=holder ${pkgs.util-linux}/bin/flock /var/lib/hanko/.lock ${pkgs.coreutils}/bin/sleep 8")
           hanko.wait_until_succeeds("systemctl is-active holder.service")
           hanko.sleep(1)
-          hanko.succeed("systemctl start --no-block hanko-renew.service")
+          hanko.succeed("systemctl start --no-block hanko-node-renew.service")
           hanko.sleep(3)
-          out = hanko.succeed("systemctl show -P ActiveState hanko-renew.service")
+          out = hanko.succeed("systemctl show -P ActiveState hanko-node-renew.service")
           assert out.strip() == "activating", out
-          hanko.wait_until_succeeds("systemctl show -P ActiveState hanko-renew.service | grep -qx inactive", timeout=30)
-          out = hanko.succeed("systemctl show -P Result hanko-renew.service; " + journal("hanko-renew.service"))
+          hanko.wait_until_succeeds("systemctl show -P ActiveState hanko-node-renew.service | grep -qx inactive", timeout=30)
+          out = hanko.succeed("systemctl show -P Result hanko-node-renew.service; " + journal("hanko-node-renew.service"))
           assert out.startswith("success") and out.count('"event":"certificate-valid"') == 4 and '"event":"certificate-renewing"' not in out, out
           assert fingerprints() == before and reloads() == 2 and reloads("late") == 0, journals()
           for c in certs:
@@ -365,7 +367,7 @@ pkgs.testers.runNixOSTest {
               "sed -E 's|^tsig_key_file *=.*|tsig_key_file = \"/run/hanko-tsig-broken\"|' /etc/hanko/hanko.toml > /run/hanko-broken.toml",
               "grep -qx 'tsig_key_file = \"/run/hanko-tsig-broken\"' /run/hanko-broken.toml",
           )
-          code, out = hanko.execute(f"{as_hanko} run /run/hanko-broken.toml 2>&1")
+          code, out = hanko.execute(f"{as_node} run /run/hanko-broken.toml 2>&1")
           assert code != 0 and out.count('"event":"certificate-failed"') == 2 and '"err":"tsig key /run/hanko-tsig-broken: ' in out, out
           code, out = hanko.execute(f"{as_hanko} status /etc/hanko/hanko.toml")
           assert code == 0, out
@@ -397,7 +399,7 @@ pkgs.testers.runNixOSTest {
       with subtest("a missing certificate directory fails before any order (review H5)"):
           hanko.succeed("mv /var/lib/hanko/cv /var/lib/hanko-cv-aside")
           hanko.fail(start_renew)
-          out = invocation("hanko-renew.service")
+          out = invocation("hanko-node-renew.service")
           assert '"event":"certificate-failed","certificate":"cv","err":"directory: ' in out, out
           # The CA is contacted only by an order: no account line, no order.
           assert '"event":"acme-account"' not in out and '"event":"certificate-written"' not in out, out
@@ -412,7 +414,7 @@ pkgs.testers.runNixOSTest {
               "grep -qx 'create_account = false' /run/hanko-strict.toml",
           )
           code, out = hanko.execute(
-              "runuser -u hanko -- env STATE_DIRECTORY=/var/lib/hanko ${lib.getExe nodes.hanko.services.hanko.package} run /run/hanko-strict.toml 2>&1"
+              "runuser -u hanko -- env STATE_DIRECTORY=/var/lib/hanko ${lib.getExe' nodes.hanko.services.hanko-node.package "hanko-node"} run /run/hanko-strict.toml 2>&1"
           )
           print(out)
           assert code != 0 and '"event":"account-key-missing"' in out and '"event":"acme-account"' not in out, out
@@ -422,11 +424,11 @@ pkgs.testers.runNixOSTest {
               "mv /var/lib/hanko-cv.pem.aside /var/lib/hanko/cv/fullchain.pem",
           )
           run_renew()
-          out = invocation("hanko-renew.service")
+          out = invocation("hanko-node-renew.service")
           assert '"event":"certificate-renewing"' not in out and '"failed":0' in out, out
 
       with subtest("both units keep key and process protections (review H14)"):
-          for unit in ["hanko.service", "hanko-renew.service"]:
+          for unit in ["hanko-node.service", "hanko-node-renew.service"]:
               for prop in ["ProtectKernelTunables", "ProtectKernelModules", "ProtectKernelLogs", "ProtectControlGroups", "ProtectClock", "RestrictRealtime", "RestrictSUIDSGID", "LockPersonality"]:
                   assert hanko.succeed(f"systemctl show -P {prop} {unit}").strip() == "yes", prop
               assert hanko.succeed(f"systemctl show -P UMask {unit}").strip() == "0077"
@@ -446,7 +448,7 @@ pkgs.testers.runNixOSTest {
               "runuser -u hanko -- sh -c 'umask 077; echo pending > /var/lib/hanko/home/.reload-pending'",
           )
           hanko.fail(start_renew)
-          out = invocation("hanko-renew.service")
+          out = invocation("hanko-node-renew.service")
           assert '"event":"reload-failed"' in out and '"renewed":0,"failed":1' in out, out
           assert '"event":"acme-account"' not in out, out
           assert hanko.succeed("systemctl show -P MainPID consumer.service") == pid
@@ -460,7 +462,7 @@ pkgs.testers.runNixOSTest {
           hanko.succeed("mkdir -p /run/empty-cert; mount --bind /run/empty-cert /var/lib/hanko/cv")
           try:
               hanko.fail(start_renew)
-              out = invocation("hanko-renew.service")
+              out = invocation("hanko-node-renew.service")
               assert '"event":"certificate-failed","certificate":"cv"' in out, out
               assert '"event":"acme-account"' not in out, out
           finally:
@@ -470,7 +472,7 @@ pkgs.testers.runNixOSTest {
           for bad, restore in [("chmod g-s /var/lib/hanko/cv; test ! -g /var/lib/hanko/cv", "chmod 2750 /var/lib/hanko/cv"), ("chmod 2770 /var/lib/hanko/cv", "chmod 2750 /var/lib/hanko/cv"), ("chgrp hanko /var/lib/hanko/cv", "chgrp consumer /var/lib/hanko/cv; chmod 2750 /var/lib/hanko/cv")]:
               hanko.succeed(bad)
               hanko.fail(start_renew)
-              out = invocation("hanko-renew.service")
+              out = invocation("hanko-node-renew.service")
               assert '"event":"certificate-failed","certificate":"cv"' in out, out
               assert '"event":"acme-account"' not in out, out
               hanko.succeed(restore)
@@ -481,7 +483,7 @@ pkgs.testers.runNixOSTest {
           soto2.succeed("systemctl stop annai.service")
           try:
               hanko.fail(start_renew)
-              out = invocation("hanko-renew.service")
+              out = invocation("hanko-node-renew.service")
               assert '"event":"certificate-failed","certificate":"cv"' in out, out
               assert '"event":"certificate-written","certificate":"cv"' not in out, out
               for name in certs["cv"]:
@@ -494,14 +496,14 @@ pkgs.testers.runNixOSTest {
       with subtest("a configuration-changing switch provisions and issues a new certificate"):
           hanko.succeed("/run/current-system/specialisation/extra-certificate/bin/switch-to-configuration switch")
           hanko.succeed("test -s /var/lib/hanko/extra/key.pem; openssl x509 -noout -checkend 0 -in /var/lib/hanko/extra/fullchain.pem")
-          out = invocation("hanko.service")
+          out = invocation("hanko-node.service")
           assert '"event":"certificate-written","certificate":"extra"' in out, out
 
       with subtest("every line hanko wrote passes the log schema (ADR 0007)"):
           # Empty input passes the validator: first prove the events are there.
           for unit, events in [
-              ("hanko.service", ["acme-account-register", "acme-account", "certificate-renewing", "certificate-written", "reload-skipped", "certificate-valid", "run-completed"]),
-              ("hanko-renew.service", ["acme-account", "certificate-valid", "certificate-renewing", "certificate-written", "run-completed"]),
+              ("hanko-node.service", ["acme-account-register", "acme-account", "certificate-renewing", "certificate-written", "reload-skipped", "certificate-valid", "run-completed"]),
+              ("hanko-node-renew.service", ["acme-account", "certificate-valid", "certificate-renewing", "certificate-written", "run-completed"]),
           ]:
               out = hanko.succeed(journal(unit))
               for e in events:

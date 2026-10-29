@@ -2,6 +2,8 @@
 
 Each milestone ends with a passing `nixosTest` (ADR-0001). Versions: v0 = public certificates in production; v1 = internal identities, opened only when a consumer needs them. Technical milestones, no calendar. A breakage seen on the real hosts becomes a `nixosTest` case before it is fixed.
 
+Since ADR-0014 (2026-10-29) the per-host oneshot is `hanko-node` and `hanko` is the operator CLI (`status`, `check`); items below that name `hanko run` or `hanko.service` mean `hanko-node`.
+
 ## External dependencies
 
 | Dependency | Blocks |
@@ -32,7 +34,7 @@ Each milestone ends with a passing `nixosTest` (ADR-0001). Versions: v0 = public
 - First certificates against Let's Encrypt staging, then production, through annai's public nameservers (annai M4): the internal wildcard and the public names genkan serves.
 - genkan reloaded by hanko and serving with those certificates; its certificates use hanko's `group = "genkan"`, genkan's own group (ADR-0005).
 - A `switch` that adds a certificate issues it during activation, before the consumer is reloaded.
-- Done when: genkan serves every declared name with a hanko certificate, an added certificate appears in the same `switch`, and the timer path (`hanko-renew.service`) ran and renewed nothing.
+- Done when: genkan serves every declared name with a hanko certificate, an added certificate appears in the same `switch`, and the timer path (`hanko-node-renew.service`) ran and renewed nothing.
 
 ## M3 — Operations (v0.3)
 

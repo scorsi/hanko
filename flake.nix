@@ -50,7 +50,8 @@
         };
     in
     {
-      # One build holds both binaries; hanko-ca only changes what `lib.getExe` returns.
+      # One build holds every binary (ADR 0014); hanko-node and hanko-ca only change what
+      # `lib.getExe` returns.
       packages = forAllSystems (
         system:
         let
@@ -60,6 +61,11 @@
           default = hanko;
           inherit hanko;
           # Same derivation; `//` changes only the attribute set, not the build.
+          hanko-node = hanko // {
+            meta = hanko.meta // {
+              mainProgram = "hanko-node";
+            };
+          };
           hanko-ca = hanko // {
             meta = hanko.meta // {
               mainProgram = "hanko-ca";
@@ -73,7 +79,7 @@
 
       # The package's check phase runs `go vet` and `go test` (nix/package.nix). `module-eval`
       # evaluates both modules on every system, macOS included. On Linux, `module` and `ca-module`
-      # build the validated TOML (so `hanko check` and `hanko-ca check` run on the modules' output)
+      # build the validated TOML (so `hanko-node check` and `hanko-ca check` run on the modules' output)
       # and `module-typo` proves a typo in it fails the build. `acme` is the M1 nixosTest
       # (nix/test-acme.nix), `internal` the v1 one (nix/test-internal.nix). `buf-lint` lints the protos and `proto-generated` fails when the
       # committed Go code differs from `buf generate proto`.
@@ -122,46 +128,52 @@
                 && !(unit ? DynamicUser)
               )
               [
-                evaluated.systemd.services.hanko.serviceConfig
-                evaluated.systemd.services.hanko-renew.serviceConfig
+                evaluated.systemd.services.hanko-node.serviceConfig
+                evaluated.systemd.services.hanko-node-renew.serviceConfig
                 evaluated.systemd.services.hanko-ca.serviceConfig
               ];
             assert lib.all (unit: unit.TimeoutStartSec > 660) [
-              evaluated.systemd.services.hanko.serviceConfig
-              evaluated.systemd.services.hanko-renew.serviceConfig
+              evaluated.systemd.services.hanko-node.serviceConfig
+              evaluated.systemd.services.hanko-node-renew.serviceConfig
             ];
             # A failed boot or switch run is retried, bounded; the timer's twin is not (ADR 0001).
             assert
-              evaluated.systemd.services.hanko.serviceConfig.Restart == "on-failure"
-              && evaluated.systemd.services.hanko.serviceConfig.RestartSec == "30s"
-              # Exit 10, cmd/hanko's exitNoQuickRetry, waits for the timer.
-              && evaluated.systemd.services.hanko.serviceConfig.RestartPreventExitStatus == "10"
-              && evaluated.systemd.services.hanko.startLimitIntervalSec == 3600
-              && evaluated.systemd.services.hanko.startLimitBurst == 5
-              && !(evaluated.systemd.services.hanko-renew.serviceConfig ? Restart);
+              evaluated.systemd.services.hanko-node.serviceConfig.Restart == "on-failure"
+              && evaluated.systemd.services.hanko-node.serviceConfig.RestartSec == "30s"
+              # Exit 10, cmd/hanko-node's exitNoQuickRetry, waits for the timer.
+              && evaluated.systemd.services.hanko-node.serviceConfig.RestartPreventExitStatus == "10"
+              && evaluated.systemd.services.hanko-node.startLimitIntervalSec == 3600
+              && evaluated.systemd.services.hanko-node.startLimitBurst == 5
+              && !(evaluated.systemd.services.hanko-node-renew.serviceConfig ? Restart);
+            # The node runs as user hanko on the same state directory whatever its name (ADR 0014).
+            assert
+              lib.hasSuffix "/bin/hanko-node run /etc/hanko/hanko.toml" evaluated.systemd.services.hanko-node.serviceConfig.ExecStart
+              && evaluated.systemd.services.hanko-node.serviceConfig.User == "hanko"
+              && evaluated.systemd.services.hanko-node.serviceConfig.StateDirectory == "hanko"
+              && evaluated.systemd.timers.hanko-node.timerConfig.Unit == "hanko-node-renew.service";
             # hanko-ca: its own static user, persists nothing (ADR 0004, ADR 0005).
             assert
               ca.User == "hanko-ca"
               && evaluated.users.users.hanko-ca.isSystemUser
               && !(ca ? StateDirectory)
               && lib.hasSuffix "/bin/hanko-ca serve /etc/hanko/ca.toml" ca.ExecStart;
-            assert lib.all (c: c.group != "") evaluated.services.hanko.settings.certificates;
+            assert lib.all (c: c.group != "") evaluated.services.hanko-node.settings.certificates;
             # The internal issuer's table and keys reach the file (ADR 0002, ADR 0004).
             assert
-              evaluated.services.hanko.settings.internal.ca == "[fd12:3456:789a::1]:4900"
+              evaluated.services.hanko-node.settings.internal.ca == "[fd12:3456:789a::1]:4900"
               && lib.any (
                 c: c.issuer == "internal" && c.spiffe_id == "spiffe://uchi.example.org/vm/api" && !(c ? hosts)
-              ) evaluated.services.hanko.settings.certificates;
+              ) evaluated.services.hanko-node.settings.certificates;
             pkgs.runCommand "hanko-module-eval" { } ''
               echo ${
                 lib.escapeShellArg (
                   builtins.unsafeDiscardStringContext (
                     builtins.toJSON {
                       inherit (evaluated.systemd) tmpfiles;
-                      unit = evaluated.systemd.services.hanko.serviceConfig;
-                      renew = evaluated.systemd.services.hanko-renew.serviceConfig;
+                      unit = evaluated.systemd.services.hanko-node.serviceConfig;
+                      renew = evaluated.systemd.services.hanko-node-renew.serviceConfig;
                       inherit ca;
-                      timer = evaluated.systemd.timers.hanko.timerConfig;
+                      timer = evaluated.systemd.timers.hanko-node.timerConfig;
                       polkit = evaluated.security.polkit.extraConfig;
                       config = evaluated.environment.etc."hanko/hanko.toml".source.name;
                       caConfig = evaluated.environment.etc."hanko/ca.toml".source.name;
@@ -200,7 +212,7 @@
           module = moduleConfig { };
           ca-module = (nixosFor system { }).config.environment.etc."hanko/ca.toml".source;
           module-typo = pkgs.testers.testBuildFailure (moduleConfig {
-            services.hanko.settings.dns.nmaeservers = [ "203.0.113.10:53" ];
+            services.hanko-node.settings.dns.nmaeservers = [ "203.0.113.10:53" ];
           });
           acme = import ./nix/test-acme.nix {
             inherit

@@ -97,3 +97,10 @@ neither, so a retry 30 s later places a new order.
 the failed one again. The other certificate waits for the next timer run, at most one period.
 ADR 0010 already lets a pending deadline fail offline; this exit code adds the no-retry rule
 for failures without a deadline. `hanko-renew.service` is unchanged: it is never retried.
+
+## Amendment 2026-10-29: component names
+
+Owner decision. The per-host oneshot described above is now `hanko-node` (units
+`hanko-node.service`, `hanko-node-renew.service`, `hanko-node.timer`, option
+`services.hanko-node`, flake output `packages.hanko-node`), and `hanko` is the operator CLI
+(`status`, `check`). User, state directory and configuration file are unchanged. See ADR-0014.

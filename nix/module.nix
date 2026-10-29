@@ -1,5 +1,5 @@
-# NixOS module for hanko (ADR 0001 oneshot and timer, ADR 0002 shape, ADR 0005 identity and
-# permissions): the checked file, the user, the directories, the unit, its timer and the polkit
+# NixOS module for hanko-node, the per-host oneshot (ADR 0001 oneshot and timer, ADR 0014 names,
+# ADR 0002 shape, ADR 0005 identity and permissions): the checked file, the user, the directories, the unit, its timer and the polkit
 # rule that lets it reload the listed units.
 self:
 {
@@ -10,9 +10,10 @@ self:
 }:
 let
   inherit (lib) mkOption types;
-  cfg = config.services.hanko;
+  cfg = config.services.hanko-node;
   toml = pkgs.formats.toml { };
-  exe = lib.getExe cfg.package;
+  # By name, so `package` may be any hanko build, whatever its mainProgram.
+  exe = lib.getExe' cfg.package "hanko-node";
   state = "/var/lib/hanko";
   serviceConfig = import ./hardening.nix // {
     Type = "oneshot";
@@ -32,7 +33,7 @@ let
   };
   reloadUnits = lib.unique (lib.concatMap (c: c.reload) (lib.attrValues cfg.certificates));
 
-  # Only the issuer tables some certificate uses: `hanko check` rejects an unused one (ADR 0002).
+  # Only the issuer tables some certificate uses: `hanko-node check` rejects an unused one (ADR 0002).
   uses = issuer: lib.any (c: c.issuer == issuer) (lib.attrValues cfg.certificates);
   generated =
     lib.optionalAttrs (uses "acme") {
@@ -62,13 +63,13 @@ let
             group
             ;
         }
-        # Passed whenever set, so `hanko check` reports a key that does not match the issuer.
+        # Passed whenever set, so `hanko-node check` reports a key that does not match the issuer.
         // lib.optionalAttrs (c.hosts != [ ]) { inherit (c) hosts; }
         // lib.optionalAttrs (c.spiffeId != null) { spiffe_id = c.spiffeId; }
       ) cfg.certificates;
     };
 
-  # `hanko check` at build time: an invalid file never becomes a system (ADR 0002).
+  # `hanko-node check` at build time: an invalid file never becomes a system (ADR 0002).
   configFile =
     let
       raw = toml.generate "hanko.toml" cfg.settings;
@@ -79,13 +80,13 @@ let
     '';
 in
 {
-  options.services.hanko = {
-    enable = lib.mkEnableOption "hanko, the homelab certificate service";
+  options.services.hanko-node = {
+    enable = lib.mkEnableOption "hanko-node, the per-host oneshot of the hanko certificate service";
 
     package = mkOption {
       type = types.package;
-      default = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
-      defaultText = lib.literalExpression "hanko.packages.\${system}.default";
+      default = self.packages.${pkgs.stdenv.hostPlatform.system}.hanko-node;
+      defaultText = lib.literalExpression "hanko.packages.\${system}.hanko-node";
       description = "The hanko package.";
     };
 
@@ -98,7 +99,7 @@ in
     onFailure = mkOption {
       type = types.listOf types.str;
       default = [ ];
-      example = [ "notify-failure@hanko.service" ];
+      example = [ "notify-failure@hanko-node.service" ];
       description = "Units started when a run fails (`OnFailure=`).";
     };
 
@@ -215,7 +216,7 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    services.hanko.settings = generated;
+    services.hanko-node.settings = generated;
 
     environment.etc."hanko/hanko.toml".source = configFile;
 
@@ -230,8 +231,8 @@ in
     ]
     ++ lib.mapAttrsToList (name: c: "d ${state}/${name} 2750 hanko ${c.group} -") cfg.certificates;
 
-    systemd.services.hanko = {
-      description = "hanko certificate run";
+    systemd.services.hanko-node = {
+      description = "hanko-node certificate run";
       # Run at boot and by every switch that changes the file, before dependents reload (ADR 0001).
       wantedBy = [ "multi-user.target" ];
       wants = [ "network-online.target" ];
@@ -241,7 +242,7 @@ in
       # A failed boot or switch run (hanko-ca's host or the overlay not up yet) is retried soon
       # rather than at the next timer: 30 s apart, at most five starts an hour, so whatever a run
       # lasts it gives up to the timer after four retries (ADR 0001 amendment). OnFailure= fires
-      # only once systemd gives up. Consumers order `after`/`wants` hanko.service, never `requires`.
+      # only once systemd gives up. Consumers order `after`/`wants` hanko-node.service, never `requires`.
       # Exit 10 (a validation failure, a CA deadline, a hanko-ca refusal) is not retried: a quick
       # retry would only spend the CA's limits again; the unit fails and OnFailure= fires at once.
       startLimitIntervalSec = 3600;
@@ -254,20 +255,20 @@ in
       };
     };
 
-    # A timer cannot rerun hanko.service, which stays active (RemainAfterExit); it starts this
+    # A timer cannot rerun hanko-node.service, which stays active (RemainAfterExit); it starts this
     # twin instead, same binary and file.
-    systemd.services.hanko-renew = {
-      description = "hanko certificate run (timer)";
+    systemd.services.hanko-node-renew = {
+      description = "hanko-node certificate run (timer)";
       wants = [ "network-online.target" ];
       after = [ "network-online.target" ];
       inherit (cfg) onFailure;
       inherit serviceConfig;
     };
 
-    systemd.timers.hanko = {
+    systemd.timers.hanko-node = {
       wantedBy = [ "timers.target" ];
       timerConfig = {
-        Unit = "hanko-renew.service";
+        Unit = "hanko-node-renew.service";
         OnCalendar = cfg.timer;
         Persistent = true;
         RandomizedDelaySec = "5m";
