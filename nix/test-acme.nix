@@ -203,6 +203,8 @@ pkgs.testers.runNixOSTest {
           "cv": ["_acme-challenge.cv.example.org.", "_acme-challenge.cv.soto.example.org."],
       }
       third = ${toString validity} // 3
+      # The binary as the state directory's owner, outside the units (status reads as hanko).
+      as_hanko = "runuser -u hanko -- env STATE_DIRECTORY=/var/lib/hanko ${lib.getExe nodes.hanko.services.hanko.package}"
 
       def journal(unit: str) -> str:
           """hanko's own lines only: `-u` would add PID 1's "Started …", which is not JSON."""
@@ -356,6 +358,20 @@ pkgs.testers.runNixOSTest {
       with subtest("a run renews both certificates once a third of their lifetime is left"):
           for c in certs:
               hanko.wait_until_succeeds(f"! openssl x509 -noout -checkend {third - 5} -in /var/lib/hanko/{c}/fullchain.pem", timeout=300)
+          # M3: with both due, a broken TSIG key fails the run, and `hanko status` still shows
+          # both certificates valid, with the failure (ADR 0011).
+          hanko.succeed(
+              "printf 'hanko:not base64\\n' > /run/hanko-tsig-broken",
+              "sed -E 's|^tsig_key_file *=.*|tsig_key_file = \"/run/hanko-tsig-broken\"|' /etc/hanko/hanko.toml > /run/hanko-broken.toml",
+              "grep -qx 'tsig_key_file = \"/run/hanko-tsig-broken\"' /run/hanko-broken.toml",
+          )
+          code, out = hanko.execute(f"{as_hanko} run /run/hanko-broken.toml 2>&1")
+          assert code != 0 and out.count('"event":"certificate-failed"') == 2 and '"err":"tsig key /run/hanko-tsig-broken: ' in out, out
+          code, out = hanko.execute(f"{as_hanko} status /etc/hanko/hanko.toml")
+          assert code == 0, out
+          for c in certs:
+              assert re.search(r'"level":"warn","v":1,"event":"certificate-status","certificate":"' + c + r'","issuer":"acme",.*"valid":true,"last_run":"[^"]+","last_result":"failed","err":"tsig key ', out), out
+          hanko.succeed(f"{as_hanko} status /etc/hanko/hanko.toml | ${validateLogs} validate --logs")
           out = run_renew()
           assert out.count('"event":"certificate-renewing"') == 2 and '"reason":"less than a third of its lifetime left"' in out, out
           assert '"event":"run-completed","certificates":2,"renewed":2,"failed":0,' in out, out
@@ -370,6 +386,8 @@ pkgs.testers.runNixOSTest {
               out = hanko.succeed(f"stat -c '%a %U %G' /var/lib/hanko/{c}/fullchain.pem /var/lib/hanko/{c}/key.pem")
               assert out == "640 hanko consumer\n640 hanko consumer\n", out
               hanko.succeed(f"openssl x509 -noout -checkend {third + 5} -in /var/lib/hanko/{c}/fullchain.pem")
+          out = hanko.succeed(f"{as_hanko} status /etc/hanko/hanko.toml")
+          assert out.count('"level":"info","v":1,"event":"certificate-status"') == 2 and out.count('"valid":true,"last_run":') == 2 and out.count('"last_result":"ok"') == 2, out
 
       def invocation(unit: str) -> str:
           """The lines of the unit's last run only."""

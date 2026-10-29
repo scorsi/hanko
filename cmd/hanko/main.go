@@ -15,15 +15,17 @@ import (
 	"github.com/scorsi/hanko/internal/run"
 )
 
-const usage = `usage: hanko check|run <config.toml>
+const usage = `usage: hanko check|run|status <config.toml>
 
 commands:
-  check  validate the configuration file and exit
-  run    renew every due certificate, write its files, reload its units, and exit
+  check   validate the configuration file and exit
+  run     renew every due certificate, write its files, reload its units, and exit
+  status  print each certificate's names, expiry and last run result on stdout, read from
+          the state directory as its owner; exit 1 if a certificate is not valid now
 `
 
 func main() {
-	if len(os.Args) != 3 || (os.Args[1] != "check" && os.Args[1] != "run") {
+	if len(os.Args) != 3 || (os.Args[1] != "check" && os.Args[1] != "run" && os.Args[1] != "status") {
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
 	}
@@ -35,6 +37,13 @@ func main() {
 		os.Exit(1)
 	}
 	if os.Args[1] == "check" {
+		return
+	}
+	if os.Args[1] == "status" {
+		// The report itself, one schema v1 line per certificate, goes to stdout (ADR 0011).
+		if run.Status(config.StateDir(), cfg.Certificates, logging.New(os.Stdout, slog.LevelInfo)) != nil {
+			os.Exit(1)
+		}
 		return
 	}
 

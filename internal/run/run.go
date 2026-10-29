@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -68,32 +69,48 @@ func (r *Runner) Run(ctx context.Context, certs []config.Certificate) error {
 
 	var errs []error
 	renewed := 0
+	last := lastRun{TS: time.Now().UTC(), Certificates: map[string]result{}}
 	for _, c := range certs {
 		ok, err := r.one(ctx, root, c)
+		last.Certificates[c.Name] = result{Result: "ok"}
 		if err != nil {
 			r.Log.Error("", "event", "certificate-failed", "certificate", c.Name, "err", err)
 			errs = append(errs, fmt.Errorf("%s: %w", c.Name, err))
+			last.Certificates[c.Name] = result{Result: "failed", Err: err.Error()}
 		}
 		if ok {
 			renewed++
 		}
 	}
-	r.Log.Info("", "event", "run-completed", "certificates", len(certs), "renewed", renewed, "failed", len(errs), "dur_us", time.Since(start).Microseconds())
+	failed := len(errs)
+	// Read by `hanko status` (ADR 0011). Owner-only, like every state file but the certificates.
+	if data, err := json.Marshal(last); err != nil {
+		errs = append(errs, err)
+	} else if err := state.WriteFiles(root, 0o600, state.File{Name: lastRunFile, Data: data}); err != nil {
+		r.Log.Error("", "event", "last-run-write-failed", "err", err)
+		errs = append(errs, err)
+	}
+	r.Log.Info("", "event", "run-completed", "certificates", len(certs), "renewed", renewed, "failed", failed, "dur_us", time.Since(start).Microseconds())
 	return errors.Join(errs...)
+}
+
+// groupID resolves a certificate's group by name or number (ADR 0009).
+func groupID(name string) (int, error) {
+	if gid, err := strconv.Atoi(name); err == nil {
+		return gid, nil
+	}
+	group, err := user.LookupGroup(name)
+	if err != nil {
+		return 0, fmt.Errorf("certificate directory: lookup group: %w", err)
+	}
+	return strconv.Atoi(group.Gid)
 }
 
 // one reports whether it renewed c.
 func (r *Runner) one(ctx context.Context, root *os.Root, c config.Certificate) (bool, error) {
-	gid, err := strconv.Atoi(c.Group)
+	gid, err := groupID(c.Group)
 	if err != nil {
-		group, err := user.LookupGroup(c.Group)
-		if err != nil {
-			return false, fmt.Errorf("certificate directory: lookup group: %w", err)
-		}
-		gid, err = strconv.Atoi(group.Gid)
-		if err != nil {
-			return false, err
-		}
+		return false, err
 	}
 	dir, err := state.Directory(root, c.Name, gid, true)
 	if err != nil {
