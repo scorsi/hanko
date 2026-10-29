@@ -82,3 +82,14 @@ SVID is renewed once less than that fraction of its real lifetime (`NotAfter` âˆ
 left. One value per host, not per certificate: every SVID of a host comes from the same
 `hanko-ca` with the same lifetime, and the timer period, which the fraction must span, is per
 host too. NixOS option `services.hanko-node.internal.renewFraction`.
+
+## Amendment 2026-10-29: a per-address connection cap
+
+The 64 concurrent connections of the server limits were shared by every caller, so one allowed
+host (or any address the overlay lets reach `tcp/4900`) could hold them all. `hanko-ca` now also
+caps the connections open from one source address at **4**; a connection beyond that is closed
+at once, while other addresses still get in, and is logged (`connection-limit`, ADR-0007). Four
+because a `hanko-node` run holds its lock and makes one short connection per call (`Bundle`,
+then `Sign` when due), so a host normally has one connection open; the rest covers an
+operator's manual run and connections the server has not yet seen closed. 64 / 4 still lets 16
+hosts reach the global cap together.

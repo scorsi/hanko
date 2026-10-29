@@ -368,7 +368,7 @@ func TestGRPC(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv := newServer(c)
-	go srv.Serve(limitListener(lis, maxConns, c.log))
+	go srv.Serve(limitListener(lis, maxConns, maxPeerConns, c.log))
 	t.Cleanup(srv.Stop)
 	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -431,7 +431,7 @@ func TestLimitListener(t *testing.T) {
 		t.Fatal(err)
 	}
 	var log bytes.Buffer
-	lis := limitListener(inner, 1, logging.New(&log, nil))
+	lis := limitListener(inner, 1, maxPeerConns, logging.New(&log, nil))
 	defer lis.Close()
 	for range 2 {
 		c, err := net.Dial("tcp", inner.Addr().String())
@@ -572,5 +572,63 @@ func TestExpiryLog(t *testing.T) {
 	c.logExpiry()
 	if !strings.Contains(log.String(), `"level":"error","v":1,`+want) {
 		t.Fatalf("expired: %s", log.String())
+	}
+}
+
+// fakeListener hands out the connections sent on its channel.
+type fakeListener struct {
+	net.Listener
+	conns chan net.Conn
+}
+
+func (f fakeListener) Accept() (net.Conn, error) { return <-f.conns, nil }
+
+// fakeConn comes from an address of the test's choosing and records its Close.
+type fakeConn struct {
+	net.Conn
+	from   string
+	closed bool
+}
+
+func (c *fakeConn) RemoteAddr() net.Addr { return &net.TCPAddr{IP: net.ParseIP(c.from), Port: 40000} }
+func (c *fakeConn) Close() error         { c.closed = true; return nil }
+
+// TestPeerLimit: an address over its cap is refused while another one still gets in, and a
+// closed connection gives its address a slot back.
+func TestPeerLimit(t *testing.T) {
+	const a, b = "fd12:3456:789a::2", "fd12:3456:789a::3"
+	var log bytes.Buffer
+	in := fakeListener{conns: make(chan net.Conn, 8)}
+	lis := limitListener(in, maxConns, maxPeerConns, logging.New(&log, nil))
+	var fromA []*fakeConn
+	for range maxPeerConns + 1 {
+		fromA = append(fromA, &fakeConn{from: a})
+		in.conns <- fromA[len(fromA)-1]
+	}
+	fromB := &fakeConn{from: b}
+	in.conns <- fromB
+	var held []net.Conn
+	for range maxPeerConns {
+		c, err := lis.Accept()
+		if err != nil {
+			t.Fatal(err)
+		}
+		held = append(held, c)
+	}
+	c, err := lis.Accept()
+	if err != nil || c.(*slotConn).Conn != fromB {
+		t.Fatalf("the other address was not accepted: %v", err)
+	}
+	if !fromA[maxPeerConns].closed {
+		t.Fatal("a connection over the address's cap was not closed")
+	}
+	if !strings.Contains(log.String(), `"level":"warn","v":1,"event":"connection-limit","scope":"peer","limit":4,"peer":"`+a+`","count":1}`) {
+		t.Fatalf("no connection-limit line: %s", log.String())
+	}
+	held[0].Close()
+	again := &fakeConn{from: a}
+	in.conns <- again
+	if c, err := lis.Accept(); err != nil || c.(*slotConn).Conn != again {
+		t.Fatalf("a freed slot was not given back to its address: %v", err)
 	}
 }

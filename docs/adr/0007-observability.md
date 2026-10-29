@@ -63,7 +63,7 @@ The deployment pins hanko's ACME account in its CAA records (RFC 8657 `accountur
 | `bundle-refused` (`Bundle()` from an address not in `hosts`) | warn | `peer`, `err` |
 | `grpc-error` (an error line of grpc-go) | error | `err` |
 | `ca-expiring` (amended 2026-10-29, see below) | warn, error once expired | `ca_not_after` |
-| `connection-limit` (amended 2026-10-29, see below) | warn | `scope`, `limit`, `count` |
+| `connection-limit` (amended 2026-10-29, see below) | warn | `scope`, `limit`, `peer` (scope `peer`), `count` |
 
 ## Amendment 2026-10-29: the internal issuer
 
@@ -100,6 +100,8 @@ stack; the events they will need:
 - **Refused calls**: `sign-refused` and `bundle-refused`, unchanged.
 - **Connection limits hit**: `connection-limit` (`warn`) when `hanko-ca` holds a connection
   back because a limit is reached. `scope` is `all` for the global cap (`limit` 64, the
-  connection waits for a free slot; no `peer`). At most one line per scope per minute, so a
+  connection waits for a free slot; no `peer`) or `peer` for the per-address cap (`limit` 4,
+  ADR-0004 amendment; the connection is closed, `peer` is its source address). At most one
+  line per scope per minute, so a
   flood cannot flood the journal; `count` is the hits since the previous line of that scope,
   this one included.

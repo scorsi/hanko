@@ -42,6 +42,7 @@ const (
 	maxRecvMsg     = 8 << 10          // one SignRequest: the CSR, the ID and protobuf framing
 	maxStreams     = 4                // concurrent RPCs per connection
 	maxConns       = 64               // concurrent connections, all callers together
+	maxPeerConns   = 4                // concurrent connections from one address (see limitListener)
 	handshakeLimit = 5 * time.Second  // connection setup (HTTP/2 preface and settings)
 	connIdle       = 30 * time.Second // an idle connection is closed
 	connAge        = time.Minute      // every connection, and so every RPC, ends within
@@ -374,7 +375,7 @@ func Serve(ctx context.Context, cfg *Config, log *slog.Logger) error {
 			}
 		}
 	}()
-	return srv.Serve(limitListener(lis, maxConns, log))
+	return srv.Serve(limitListener(lis, maxConns, maxPeerConns, log))
 }
 
 // expiryWarning is `hanko status`'s threshold (ADR 0011): a rotation (ADR 0012) takes days.
@@ -409,38 +410,70 @@ func newServer(c *CA) *grpc.Server {
 	return srv
 }
 
-// limitListener holds at most n connections at once: Accept takes the next connection, then
-// waits for a slot, logging connection-limit (rate-limited) when it has to.
-func limitListener(l net.Listener, n int, log *slog.Logger) net.Listener {
+// limitListener holds at most n connections at once and perPeer from one source address. A
+// connection beyond perPeer is closed at once, so one host cannot take every slot while the
+// others still get in; beyond n, Accept waits for a slot. Both log connection-limit
+// (rate-limited). A hanko-node run holds a lock and makes one short connection per call, so a
+// host normally has one connection open; perPeer 4 leaves room for a manual run and for
+// connections the server has not seen closed yet.
+func limitListener(l net.Listener, n, perPeer int, log *slog.Logger) net.Listener {
 	return &limited{Listener: l, slots: make(chan struct{}, n), done: make(chan struct{}),
-		full: limitLog{log: log, scope: "all", limit: n}}
+		perPeer: perPeer, peers: map[netip.Addr]int{},
+		full: limitLog{log: log, scope: "all", limit: n}, peerFull: limitLog{log: log, scope: "peer", limit: perPeer}}
 }
 
 type limited struct {
 	net.Listener
-	slots chan struct{}
-	done  chan struct{}
-	once  sync.Once
-	full  limitLog
+	slots    chan struct{}
+	done     chan struct{}
+	once     sync.Once
+	perPeer  int
+	mu       sync.Mutex
+	peers    map[netip.Addr]int // open connections per source address
+	full     limitLog
+	peerFull limitLog
 }
 
 func (l *limited) Accept() (net.Conn, error) {
-	conn, err := l.Listener.Accept()
-	if err != nil {
-		return nil, err
-	}
-	select {
-	case l.slots <- struct{}{}:
-	default:
-		l.full.hit(netip.Addr{})
+	for {
+		conn, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		ap, _ := netip.ParseAddrPort(conn.RemoteAddr().String())
+		from := ap.Addr().Unmap()
+		l.mu.Lock()
+		over := l.peers[from] >= l.perPeer
+		if !over {
+			l.peers[from]++
+		}
+		l.mu.Unlock()
+		if over {
+			conn.Close()
+			l.peerFull.hit(from)
+			continue
+		}
+		free := func() {
+			l.mu.Lock()
+			if l.peers[from]--; l.peers[from] == 0 {
+				delete(l.peers, from)
+			}
+			l.mu.Unlock()
+		}
 		select {
 		case l.slots <- struct{}{}:
-		case <-l.done:
-			conn.Close()
-			return nil, net.ErrClosed
+		default:
+			l.full.hit(netip.Addr{})
+			select {
+			case l.slots <- struct{}{}:
+			case <-l.done:
+				conn.Close()
+				free()
+				return nil, net.ErrClosed
+			}
 		}
+		return &slotConn{Conn: conn, free: func() { <-l.slots; free() }}, nil
 	}
-	return &slotConn{Conn: conn, free: func() { <-l.slots }}, nil
 }
 
 func (l *limited) Close() error {
@@ -452,7 +485,7 @@ func (l *limited) Close() error {
 // cannot flood the journal; count is the hits since the previous line, this one included.
 type limitLog struct {
 	log   *slog.Logger
-	scope string // "all": every caller together
+	scope string // "all": every caller together; "peer": one source address
 	limit int
 	mu    sync.Mutex
 	last  time.Time
