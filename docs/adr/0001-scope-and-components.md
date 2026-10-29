@@ -64,3 +64,15 @@ Go, stdlib first, as in genkan. Allowed modules, any addition needs an ADR:
 - hanko listens on nothing in v0; its attack surface is outbound only.
 - Adding a certificate is a Nix change that takes effect in the same `switch`, at the cost of the issuance time (about a minute for DNS-01).
 - `hanko-ca` is the only component that will ever hold a signing key of the homelab's own.
+
+## Amendment 2026-10-29: a failed boot or switch run is retried
+
+Owner decision. `hanko.service` (boot and `switch`) gets `Restart=on-failure` with
+`RestartSec=30s`, `StartLimitIntervalSec=1h` and `StartLimitBurst=5`: after a full outage,
+`hanko-ca`'s host or the overlay may come up a minute after this host, and the next attempt
+should not wait for the hourly timer. The limit is per hour, not per few minutes, so that runs
+which fail slowly (an ACME order runs up to ten minutes) still stop after four retries; ADR 0010's
+`.retry-after` makes a retry within a CA deadline fail offline. `OnFailure=` fires once systemd
+gives up, not on each retry; `switch` resets failed units, so the limit never blocks a later
+`switch`. The timer's `hanko-renew.service` is not retried: its next attempt is the next period.
+Dependent units keep `After=` and `Wants=` `hanko.service`, as above.

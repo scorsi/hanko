@@ -22,7 +22,9 @@ Four products, one domain each, no shared code between them:
 
 - **`hanko`**, a per-host oneshot run by a systemd timer and at every `switch`
   that changes its configuration; writes files, reloads the units it is told
-  to, listens on nothing (ADR 0001). Go, stdlib first.
+  to, listens on nothing (ADR 0001). Go, stdlib first. A failed run at boot or
+  `switch` is retried every 30 s, at most four times an hour. Units that read
+  certificates declare `after` and `wants` `hanko.service`, never `requires`.
 - **ACME issuer**: DNS-01 only, RFC 2136 with TSIG against every annai `soto`
   nameserver, propagation checked by asking each one by address (ADR 0003).
 - **Internal issuer**, v1: SPIFFE IDs under the internal zone, X.509-SVIDs of

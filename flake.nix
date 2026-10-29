@@ -130,6 +130,13 @@
               evaluated.systemd.services.hanko.serviceConfig
               evaluated.systemd.services.hanko-renew.serviceConfig
             ];
+            # A failed boot or switch run is retried, bounded; the timer's twin is not (ADR 0001).
+            assert
+              evaluated.systemd.services.hanko.serviceConfig.Restart == "on-failure"
+              && evaluated.systemd.services.hanko.serviceConfig.RestartSec == "30s"
+              && evaluated.systemd.services.hanko.startLimitIntervalSec == 3600
+              && evaluated.systemd.services.hanko.startLimitBurst == 5
+              && !(evaluated.systemd.services.hanko-renew.serviceConfig ? Restart);
             # hanko-ca: its own static user, persists nothing (ADR 0004, ADR 0005).
             assert
               ca.User == "hanko-ca"

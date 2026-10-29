@@ -235,8 +235,16 @@ in
       after = [ "network-online.target" ];
       restartTriggers = [ configFile ];
       inherit (cfg) onFailure;
+      # A failed boot or switch run (hanko-ca's host or the overlay not up yet) is retried soon
+      # rather than at the next timer: 30 s apart, at most five starts an hour, so whatever a run
+      # lasts it gives up to the timer after four retries (ADR 0001 amendment). OnFailure= fires
+      # only once systemd gives up. Consumers order `after`/`wants` hanko.service, never `requires`.
+      startLimitIntervalSec = 3600;
+      startLimitBurst = 5;
       serviceConfig = serviceConfig // {
         RemainAfterExit = true;
+        Restart = "on-failure";
+        RestartSec = "30s";
       };
     };
 
