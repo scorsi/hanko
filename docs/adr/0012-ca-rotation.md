@@ -1,6 +1,6 @@
 # ADR-0012: CA rotation for `hanko-ca`
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-10-29
 
 ## Context
