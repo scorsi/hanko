@@ -226,7 +226,7 @@ pkgs.testers.runNixOSTest {
 
       # Back-to-back failing starts would trip systemd's start rate limit (5 per 10 s), after
       # which a valid restore still fails with start-limit-hit without running hanko.
-      start_renew = "systemctl reset-failed hanko-node-renew.service; systemctl start hanko-node-renew.service"
+      start_renew = "systemctl reset-failed hanko-node-renew.service || true; systemctl start hanko-node-renew.service"
 
       def run_renew() -> str:
           """Starts the timer's twin, waits for it, returns its journal."""

@@ -114,7 +114,7 @@ pkgs.testers.runNixOSTest {
       # hanko-node runs, hanko reports (ADR 0014); both as user hanko (ADR 0011).
       node_bin = "${lib.getExe' nodes.alpha.services.hanko-node.package "hanko-node"}"
       as_hanko = "runuser -u hanko -- env STATE_DIRECTORY=/var/lib/hanko ${lib.getExe' nodes.alpha.services.hanko-node.package "hanko"}"
-      start_renew = "systemctl reset-failed hanko-node-renew.service; systemctl start hanko-node-renew.service"
+      start_renew = "systemctl reset-failed hanko-node-renew.service || true; systemctl start hanko-node-renew.service"
       hosts = [(alpha, alpha_id, beta, beta_id, beta_ip), (beta, beta_id, alpha, alpha_id, alpha_ip)]
 
       def journal(unit: str) -> str:
