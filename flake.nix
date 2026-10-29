@@ -75,7 +75,7 @@
       # evaluates both modules on every system, macOS included. On Linux, `module` and `ca-module`
       # build the validated TOML (so `hanko check` and `hanko-ca check` run on the modules' output)
       # and `module-typo` proves a typo in it fails the build. `acme` is the M1 nixosTest
-      # (nix/test-acme.nix). `buf-lint` lints the protos and `proto-generated` fails when the
+      # (nix/test-acme.nix), `internal` the v1 one (nix/test-internal.nix). `buf-lint` lints the protos and `proto-generated` fails when the
       # committed Go code differs from `buf generate proto`.
       checks = forAllSystems (
         system:
@@ -201,6 +201,7 @@
               pkgs
               ;
           };
+          internal = import ./nix/test-internal.nix { inherit self nisshi pkgs; };
         }
       );
 
