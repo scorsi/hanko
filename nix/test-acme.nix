@@ -393,7 +393,9 @@ pkgs.testers.runNixOSTest {
 
       def invocation(unit: str) -> str:
           """The lines of the unit's last run only."""
-          inv = hanko.succeed(f"systemctl show -P InvocationID {unit}").strip()
+          # InvocationID is emptied once the oneshot is inactive: take the last run's from the journal.
+          inv = hanko.succeed(f"journalctl --sync; journalctl --no-pager _SYSTEMD_UNIT={unit} -n 1 -o export | sed -n 's/^_SYSTEMD_INVOCATION_ID=//p'").strip()
+          assert inv, unit
           return hanko.succeed(f"journalctl --no-pager _SYSTEMD_INVOCATION_ID={inv} -o cat")
 
       with subtest("a missing certificate directory fails before any order (review H5)"):

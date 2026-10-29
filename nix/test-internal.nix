@@ -122,7 +122,9 @@ pkgs.testers.runNixOSTest {
 
       def invocation(m: QemuMachine, unit: str) -> str:
           """The lines of the unit's last run only."""
-          inv = m.succeed(f"systemctl show -P InvocationID {unit}").strip()
+          # InvocationID is emptied once the oneshot is inactive: take the last run's from the journal.
+          inv = m.succeed(f"journalctl --sync; journalctl --no-pager _SYSTEMD_UNIT={unit} -n 1 -o export | sed -n 's/^_SYSTEMD_INVOCATION_ID=//p'").strip()
+          assert inv, unit
           return m.succeed(f"journalctl --no-pager _SYSTEMD_INVOCATION_ID={inv} -o cat")
 
       def call(m: QemuMachine, peer_id: str, address: str) -> str:
