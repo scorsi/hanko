@@ -220,6 +220,14 @@ in
 
     environment.etc."hanko/hanko.toml".source = configFile;
 
+    # Only the operator CLI on the PATH (ADR 0014): the package also holds hanko-node and hanko-ca.
+    environment.systemPackages = [
+      (pkgs.runCommand "hanko-cli" { } ''
+        mkdir -p $out/bin
+        ln -s ${lib.getExe' cfg.package "hanko"} $out/bin/hanko
+      '')
+    ];
+
     users.users.hanko = {
       isSystemUser = true;
       group = "hanko";
