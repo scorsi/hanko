@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+package hanko.ca.v1;
+
+option go_package = "github.com/scorsi/hanko/internal/gen/hanko/ca/v1;cav1";
+
+// The internal signer, served by hanko-ca over the overlay (ADR 0004). The caller is
+// identified by its overlay source address, which kekkai guarantees; there is no other
+// credential.
+service CAService {
+  // Signs an X.509-SVID for spiffe_id, if the caller's address may request it.
+  rpc Sign(SignRequest) returns (SignResponse);
+  // The trust bundle: every CA certificate of hanko-ca's certificate file.
+  rpc Bundle(BundleRequest) returns (BundleResponse);
+}
+
+message SignRequest {
+  // PKCS #10 request, DER, for an ECDSA P-256 key. Its only SAN, if any, is spiffe_id as a URI.
+  bytes csr = 1;
+  // spiffe://<trust domain>/<host>/<service>
+  string spiffe_id = 2;
+}
+
+message SignResponse {
+  // The X.509-SVID, DER.
+  bytes svid = 1;
+  // The CA certificates, DER, the signing one first.
+  repeated bytes bundle = 2;
+}
+
+message BundleRequest {}
+
+message BundleResponse {
+  // The CA certificates, DER, the signing one first.
+  repeated bytes bundle = 1;
+}

@@ -42,6 +42,7 @@
         lib.nixosSystem {
           modules = [
             self.nixosModules.default
+            self.nixosModules.ca
             ./nix/example.nix
             extra
             { nixpkgs.hostPlatform = linux; }
@@ -49,16 +50,33 @@
         };
     in
     {
-      packages = forAllSystems (system: {
-        default = (pkgsFor system).callPackage ./nix/package.nix { inherit src; };
-      });
+      # One build holds both binaries; hanko-ca only changes what `lib.getExe` returns.
+      packages = forAllSystems (
+        system:
+        let
+          hanko = (pkgsFor system).callPackage ./nix/package.nix { inherit src; };
+        in
+        {
+          default = hanko;
+          inherit hanko;
+          # Same derivation; `//` changes only the attribute set, not the build.
+          hanko-ca = hanko // {
+            meta = hanko.meta // {
+              mainProgram = "hanko-ca";
+            };
+          };
+        }
+      );
 
       nixosModules.default = import ./nix/module.nix self;
+      nixosModules.ca = import ./nix/ca.nix self;
 
       # The package's check phase runs `go vet` and `go test` (nix/package.nix). `module-eval`
-      # evaluates the module on every system, macOS included. On Linux, `module` builds the
-      # validated TOML (so `hanko check` runs on the module's output) and `module-typo` proves a
-      # typo in it fails the build. `acme` is the M1 nixosTest (nix/test-acme.nix).
+      # evaluates both modules on every system, macOS included. On Linux, `module` and `ca-module`
+      # build the validated TOML (so `hanko check` and `hanko-ca check` run on the modules' output)
+      # and `module-typo` proves a typo in it fails the build. `acme` is the M1 nixosTest
+      # (nix/test-acme.nix). `buf-lint` lints the protos and `proto-generated` fails when the
+      # committed Go code differs from `buf generate proto`.
       checks = forAllSystems (
         system:
         let
@@ -66,6 +84,7 @@
           linux = if lib.hasSuffix "-linux" system then system else "aarch64-linux";
           moduleConfig = extra: (nixosFor system extra).config.environment.etc."hanko/hanko.toml".source;
           evaluated = (nixosFor linux { }).config;
+          ca = evaluated.systemd.services.hanko-ca.serviceConfig;
         in
         {
           default = self.packages.${system}.default;
@@ -88,12 +107,35 @@
                 && unit.RestrictSUIDSGID
                 && unit.LockPersonality
                 && unit.SystemCallArchitectures == "native"
-                && unit.TimeoutStartSec > 660
+                && unit.CapabilityBoundingSet == ""
+                && unit.NoNewPrivileges
+                && unit.ProtectSystem == "strict"
+                && unit.ProtectHome
+                && unit.PrivateTmp
+                && unit.PrivateDevices
+                &&
+                  unit.RestrictAddressFamilies == [
+                    "AF_INET"
+                    "AF_INET6"
+                    "AF_UNIX"
+                  ]
+                && !(unit ? DynamicUser)
               )
               [
                 evaluated.systemd.services.hanko.serviceConfig
                 evaluated.systemd.services.hanko-renew.serviceConfig
+                evaluated.systemd.services.hanko-ca.serviceConfig
               ];
+            assert lib.all (unit: unit.TimeoutStartSec > 660) [
+              evaluated.systemd.services.hanko.serviceConfig
+              evaluated.systemd.services.hanko-renew.serviceConfig
+            ];
+            # hanko-ca: its own static user, persists nothing (ADR 0004, ADR 0005).
+            assert
+              ca.User == "hanko-ca"
+              && evaluated.users.users.hanko-ca.isSystemUser
+              && !(ca ? StateDirectory)
+              && lib.hasSuffix "/bin/hanko-ca serve /etc/hanko/ca.toml" ca.ExecStart;
             assert lib.all (c: c.group != "") evaluated.services.hanko.settings.certificates;
             pkgs.runCommand "hanko-module-eval" { } ''
               echo ${
@@ -103,17 +145,45 @@
                       inherit (evaluated.systemd) tmpfiles;
                       unit = evaluated.systemd.services.hanko.serviceConfig;
                       renew = evaluated.systemd.services.hanko-renew.serviceConfig;
+                      inherit ca;
                       timer = evaluated.systemd.timers.hanko.timerConfig;
                       polkit = evaluated.security.polkit.extraConfig;
                       config = evaluated.environment.etc."hanko/hanko.toml".source.name;
+                      caConfig = evaluated.environment.etc."hanko/ca.toml".source.name;
                     }
                   )
                 )
               } > $out
             '';
+
+          buf-lint = pkgs.runCommand "hanko-buf-lint" { nativeBuildInputs = [ pkgs.buf ]; } ''
+            export HOME=$TMPDIR
+            cd ${./proto}
+            buf lint
+            touch $out
+          '';
+
+          proto-generated =
+            pkgs.runCommand "hanko-proto-generated"
+              {
+                nativeBuildInputs = [
+                  pkgs.buf
+                  pkgs.protoc-gen-go
+                  pkgs.protoc-gen-go-grpc
+                ];
+              }
+              ''
+                export HOME=$TMPDIR
+                cp -r ${./proto} proto
+                cp ${./buf.gen.yaml} buf.gen.yaml
+                buf generate proto
+                diff -r ${./internal/gen} internal/gen
+                touch $out
+              '';
         }
         // lib.optionalAttrs (lib.hasSuffix "-linux" system) {
           module = moduleConfig { };
+          ca-module = (nixosFor system { }).config.environment.etc."hanko/ca.toml".source;
           module-typo = pkgs.testers.testBuildFailure (moduleConfig {
             services.hanko.settings.dns.nmaeservers = [ "203.0.113.10:53" ];
           });
@@ -138,6 +208,9 @@
             packages = [
               pkgs.go
               pkgs.gopls
+              pkgs.buf
+              pkgs.protoc-gen-go
+              pkgs.protoc-gen-go-grpc
             ];
           };
         }

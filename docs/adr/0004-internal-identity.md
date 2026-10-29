@@ -54,3 +54,12 @@ JWT-SVIDs, federation between trust domains, the Workload API (`hanko-agent`, re
 - The author's services gain an identity to authorise on; consumers that do not speak SPIFFE still get an ordinary mTLS certificate and bundle.
 - `hanko-ca` is the first thing in the stack whose compromise forges identities; it runs on the node the deployment trusts most, with the hardening of ADR-0005.
 - Every ID is a line in Nix, so adding a service to the trust domain is reviewed like any other change.
+
+## Amendment 2026-10-29: wire format and CSR checks
+
+Details the implementation fixed within the decision above:
+
+- **Wire format**: `Sign` takes the CSR as PKCS #10 DER and returns the SVID as DER; the bundle, in both replies, is the DER certificates of `cert_file`, the one matching the key first. `Bundle()` answers any caller: CA certificates are public. Plaintext gRPC, the overlay being the transport.
+- **CSR at the trust boundary**: the address must be allowed the requested ID before the CSR is read; the CSR must parse, carry a valid self-signature and an ECDSA P-256 key. The certificate is built from `spiffe_id` and the CSR's key only, so a URI SAN in the CSR is optional, but a CSR naming anything else (another or a second URI, any DNS, IP or email SAN) is refused rather than silently narrowed: it means a confused or hostile caller. Refusals are `PermissionDenied` (ID) or `InvalidArgument` (CSR), and logged.
+- **Validity**: `NotBefore` is one minute in the past for clock differences between hosts, `NotAfter` is `NotBefore` plus `svid_lifetime`; the serial is random.
+- **Configuration checks** (`hanko-ca check`, run by the module at build time without the key): absolute paths, `listen` a specific IP with a port above 1024 (ADR-0005), duplicate addresses refused, every ID `spiffe://<trust domain>/<host>/<service>` with the SPIFFE character rules, one trust domain for all IDs (no federation). At start the key must be ECDSA P-256 and match one CA certificate of `cert_file`.

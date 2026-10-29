@@ -8,7 +8,7 @@ Each milestone ends with a passing `nixosTest` (ADR-0001). Versions: v0 = public
 |---|---|
 | annai M3 (`soto` mode, RFC 2136 with TSIG) as a flake input | the `nixosTest` of M1 |
 | annai M4 (annai is the public nameserver) | M2, the first real certificate |
-| A consumer that needs service identity | v1 as a whole |
+| A consumer that needs service identity | v1 as a whole: met, hikyaku and azukari (2026-10-29) |
 
 ## M0 — Foundations
 
@@ -41,11 +41,11 @@ Each milestone ends with a passing `nixosTest` (ADR-0001). Versions: v0 = public
 - Failure notification wired through `OnFailure=` in the deployment.
 - Done when: a deliberately broken TSIG key produces a non-zero exit, a notification, and `hanko status` showing the certificate still valid.
 
-## v1 — Internal identity (not scheduled)
+## v1 — Internal identity (scheduled, opened 2026-10-29)
 
-Opens when a consumer needs service identity, which today means the author's own Go and Rust services calling each other. Nothing here starts before that need exists; the formats are already fixed in ADR-0004 so that v0 files never change.
+Opened by the owner on 2026-10-29: two consumers now need service identity, hikyaku (log shipping) and azukari (storage and backup), whose calls are authorised on the caller's SPIFFE ID. The formats were fixed in ADR-0004 so that v0 files never change.
 
-- `hanko-ca`: daemon holding the CA key, gRPC `Sign` and `Bundle` under `proto/hanko/ca/v1/` with buf, overlay-address to allowed-IDs mapping, static user and hardening (ADR-0004, ADR-0005). NixOS module `ca`.
+- ~~`hanko-ca`: daemon holding the CA key, gRPC `Sign` and `Bundle` under `proto/hanko/ca/v1/` with buf, overlay-address to allowed-IDs mapping, static user and hardening (ADR-0004, ADR-0005). NixOS module `ca`~~: done; unit and loopback gRPC tests, `module-eval` covers the `ca` module.
 - `internal` issuer in `hanko`: CSR with the SPIFFE ID as URI SAN, `svid.pem`, `key.pem`, `bundle.pem`, 24 h lifetime renewed at half.
 - `nixosTest`: `hanko-ca` on one VM, `hanko` on two others, a service on each authenticating the other by SPIFFE ID over mTLS; a request for an ID not allowed for the caller's address is refused; the bundle is refreshed on every run.
 - Deployment side: `tcp/4900` allowed from every hanko host in kekkai's per-peer rules; the node carrying `hanko-ca` chosen and its risk recorded privately.

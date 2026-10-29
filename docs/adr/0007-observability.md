@@ -49,3 +49,15 @@ hanko is a oneshot that listens on nothing (ADR-0001): there is no process alive
 ## Amendment 2026-10-21: the account URL is logged
 
 The deployment pins hanko's ACME account in its CAA records (RFC 8657 `accounturi=`), so the owner must be able to read the account URL; until now only the key was kept. Owner decision: hanko logs it, nothing new is stored. `acme-account` (info, `directory`, `uri`) is written by every run that contacts the CA, once the account is known: after a registration (following `acme-account-register`) and when the key's account already exists (the `onlyReturnExisting` lookup already returns the URL, no extra request). A run with nothing due stays offline (ADR-0001, ADR-0003) and so does not write it; the URL is stable for a given account key, so the last `acme-account` line in the journal or in nisshi gives it. `acme-account-register` keeps its place before the request, so a failed registration still leaves a trace; one event carrying `uri` in both cases keeps a single query for the URL.
+
+## Amendment 2026-10-29: `hanko-ca` events
+
+`hanko-ca` (ADR-0004) writes schema v1 lines on stderr through the same `internal/logging`; grpc-go's own logger is routed into it so stderr stays schema v1. `hanko-ca check` logs `config-invalid` like `hanko check`. No metrics yet: `hanko-ca`'s series remain future work.
+
+| Event | Level | Fields |
+|---|---|---|
+| `ca-started` (listening) | info | `listen`, `hosts` (count), `ca_not_after` |
+| `ca-failed` (key, certificate or listener unusable, or serving stopped on an error) | error | `err` |
+| `svid-signed` | info | `peer`, `spiffe_id`, `serial` (hex), `not_after` |
+| `sign-refused` (ID not allowed for the address, or a CSR refused; `spiffe_id` cut at 256 bytes) | warn | `peer`, `spiffe_id`, `err` |
+| `grpc-error` (an error line of grpc-go) | error | `err` |

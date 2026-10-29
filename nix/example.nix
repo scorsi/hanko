@@ -1,4 +1,5 @@
-# Sample configuration for the module checks in flake.nix: the example of ADR 0002, in module form.
+# Sample configuration for the module checks in flake.nix: the examples of ADR 0002 (hanko) and
+# ADR 0004 (hanko-ca), in module form.
 {
   system.stateVersion = "26.05";
 
@@ -28,6 +29,17 @@
       reload = [ "genkan.service" ];
       group = "genkan";
     };
+  };
+
+  services.hanko-ca = {
+    enable = true;
+    keyFile = "/run/secrets/hanko-ca-key";
+    certFile = "/etc/hanko/ca.pem";
+    listen = "[fd12:3456:789a::1]:4900";
+    hosts."fd12:3456:789a::2" = [
+      "spiffe://uchi.example.org/vm/api"
+      "spiffe://uchi.example.org/vm/git"
+    ];
   };
 
   users.groups.genkan = { };
