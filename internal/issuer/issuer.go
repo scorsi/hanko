@@ -238,7 +238,7 @@ func (i *Issuer) Issue(ctx context.Context, root *os.Root, hosts []string) (chai
 		}
 		n := slices.IndexFunc(z.Challenges, func(ch *acme.Challenge) bool { return ch.Type == "dns-01" })
 		if n < 0 {
-			return nil, nil, errors.New("authorization offers no dns-01 challenge")
+			return nil, nil, noQuickRetry{errors.New("authorization offers no dns-01 challenge")}
 		}
 		v, err := c.DNS01ChallengeRecord(z.Challenges[n].Token)
 		if err != nil {
@@ -302,10 +302,10 @@ func (i *Issuer) Issue(ctx context.Context, root *os.Root, hosts []string) (chai
 	}
 	leaf, err := x509.ParseCertificate(der[0])
 	if err != nil {
-		return nil, nil, errors.New("issued certificate: invalid encoding")
+		return nil, nil, noQuickRetry{errors.New("issued certificate: invalid encoding")}
 	}
 	if !k.PublicKey.Equal(leaf.PublicKey) || !sameHosts(leaf.DNSNames, hosts) {
-		return nil, nil, errors.New("issued certificate does not match the request")
+		return nil, nil, noQuickRetry{errors.New("issued certificate does not match the request")}
 	}
 	var buf bytes.Buffer
 	for _, d := range der {

@@ -51,8 +51,9 @@ func TestIssueFailureCleanup(t *testing.T) {
 			case "cancellation":
 				d.wait = func(context.Context) error { cancel(); return ctx.Err() }
 			}
-			if _, _, err := issue(t, i, ctx, hosts); err == nil {
-				t.Fatal("want failure")
+			_, _, err := issue(t, i, ctx, hosts)
+			if err == nil || errors.Is(err, ErrNoQuickRetry) != (kind == "CA rejection") {
+				t.Fatalf("want failure, final only for a CA rejection: %v", err)
 			}
 			for name, txt := range d.txt {
 				if len(txt) != 0 {
@@ -92,7 +93,7 @@ func TestIssueRejectsMismatchedCAOutput(t *testing.T) {
 		t.Run(what, func(t *testing.T) {
 			i, ca, d := memorySetup(t)
 			ca.mismatch = what
-			if chain, key, err := issue(t, i, context.Background(), hosts); err == nil || len(chain) > 0 || len(key) > 0 {
+			if chain, key, err := issue(t, i, context.Background(), hosts); !errors.Is(err, ErrNoQuickRetry) || len(chain) > 0 || len(key) > 0 {
 				t.Fatal("mismatched output accepted")
 			}
 			for _, txt := range d.txt {
@@ -110,7 +111,7 @@ func TestIssueHTTPRateLimitPersists(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	started := time.Now()
-	if _, _, err := issue(t, i, ctx, hosts); err == nil || !strings.Contains(err.Error(), "retry deferred until") {
+	if _, _, err := issue(t, i, ctx, hosts); !errors.Is(err, ErrNoQuickRetry) || !strings.Contains(err.Error(), "retry deferred until") {
 		t.Fatalf("rate limit: %v", err)
 	}
 	if time.Since(started) > 500*time.Millisecond {
@@ -119,8 +120,8 @@ func TestIssueHTTPRateLimitPersists(t *testing.T) {
 	requests := ca.nonce
 	for _, next := range []*Issuer{i, issuerForCA(t, ca, ca.dns, true)} {
 		next.ACME = i.ACME
-		if _, _, err := issue(t, next, context.Background(), hosts); err == nil {
-			t.Fatal("retry was not blocked")
+		if _, _, err := issue(t, next, context.Background(), hosts); !errors.Is(err, ErrNoQuickRetry) {
+			t.Fatalf("retry was not blocked, or not final: %v", err)
 		}
 	}
 	if ca.nonce != requests {

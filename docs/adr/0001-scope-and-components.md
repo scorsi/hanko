@@ -76,3 +76,24 @@ which fail slowly (an ACME order runs up to ten minutes) still stop after four r
 gives up, not on each retry; `switch` resets failed units, so the limit never blocks a later
 `switch`. The timer's `hanko-renew.service` is not retried: its next attempt is the next period.
 Dependent units keep `After=` and `Wants=` `hanko.service`, as above.
+
+## Amendment 2026-10-29: failures a quick retry cannot fix are not retried
+
+Owner decision. With the retry above, an ACME certificate whose validation keeps failing would
+be ordered five times an hour, Let's Encrypt's failed-validation limit per hostname, against
+ADR 0010's "never loops over failed validations". ADR 0010's `.retry-after` does not prevent it:
+a deadline is saved only when the CA gives one or rate-limits, and a failed validation carries
+neither, so a retry 30 s later places a new order.
+
+`hanko run` therefore exits with:
+
+| Code | Meaning | `hanko.service` |
+|---|---|---|
+| 0 | every certificate valid at exit | done |
+| 1 | a failure a retry may fix: hanko-ca or the ACME CA unreachable, DNS UPDATE or propagation failure, a run-level error (state, lock) | retried as above |
+| 10 | some certificate failed for a reason a quick retry cannot fix: any problem document from the ACME CA (a failed validation or order among them), a CA retry deadline (ADR 0010, saved or still pending), CA output not matching the order, or hanko-ca's refusal (`InvalidArgument`, `PermissionDenied`, `FailedPrecondition`) | not retried (`RestartPreventExitStatus=10`); the unit fails and `OnFailure=` fires |
+
+10 wins when one run has both kinds: a retry runs every due certificate again and would order
+the failed one again. The other certificate waits for the next timer run, at most one period.
+ADR 0010 already lets a pending deadline fail offline; this exit code adds the no-retry rule
+for failures without a deadline. `hanko-renew.service` is unchanged: it is never retried.

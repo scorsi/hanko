@@ -23,7 +23,11 @@ Four products, one domain each, no shared code between them:
 - **`hanko`**, a per-host oneshot run by a systemd timer and at every `switch`
   that changes its configuration; writes files, reloads the units it is told
   to, listens on nothing (ADR 0001). Go, stdlib first. A failed run at boot or
-  `switch` is retried every 30 s, at most four times an hour. Units that read
+  `switch` is retried every 30 s, at most four times an hour. Exit codes: 0
+  every certificate valid, 1 a failure a retry may fix (hanko-ca, the network
+  or annai not up yet), 10 a failure a quick retry cannot fix (ACME validation
+  or CA error, CA retry deadline, hanko-ca refusal), never retried before the
+  next timer run; 10 wins when a run has both, 2 a usage error. Units that read
   certificates declare `after` and `wants` `hanko.service`, never `requires`.
 - **ACME issuer**: DNS-01 only, RFC 2136 with TSIG against every annai `soto`
   nameserver, propagation checked by asking each one by address (ADR 0003).

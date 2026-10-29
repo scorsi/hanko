@@ -31,6 +31,7 @@ import (
 type stubIssuer struct {
 	calls int
 	fail  string
+	err   error // returned for fail instead of a transient error when set
 	last  []byte
 	hold  func() // called inside Issue when set
 }
@@ -41,6 +42,9 @@ func (s *stubIssuer) Issue(_ context.Context, _ *os.Root, hosts []string) ([]byt
 	}
 	s.calls++
 	if slices.Contains(hosts, s.fail) {
+		if s.err != nil {
+			return nil, nil, s.err
+		}
 		return nil, nil, errors.New("validation failed")
 	}
 	k, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

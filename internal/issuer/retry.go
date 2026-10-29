@@ -22,6 +22,17 @@ type retryState struct {
 	Until time.Time `json:"until"`
 }
 
+// ErrNoQuickRetry is matched by an Issue error that a retry within minutes cannot fix and that
+// would spend the CA's limits again: any problem document from the CA (a failed validation
+// among them), a retry deadline, or CA output that does not match the order. ADR 0010: such
+// a failure waits for the next timer run. Run's error matches it too (ADR 0001 amendment).
+var ErrNoQuickRetry = errors.New("a certificate failed for a reason a quick retry cannot fix")
+
+type noQuickRetry struct{ error }
+
+func (e noQuickRetry) Unwrap() error      { return e.error }
+func (noQuickRetry) Is(target error) bool { return target == ErrNoQuickRetry }
+
 func (i *Issuer) retryScope() string {
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(i.ACME.Directory+"\x00"+i.ACME.AccountKeyFile)))
 }
@@ -41,7 +52,7 @@ func (i *Issuer) checkRetry(root *os.Root) error {
 		}
 	}
 	if time.Now().Before(i.retryUntil) {
-		return fmt.Errorf("acme: retry deferred until %s", i.retryUntil.UTC().Format(time.RFC3339))
+		return noQuickRetry{fmt.Errorf("acme: retry deferred until %s", i.retryUntil.UTC().Format(time.RFC3339))}
 	}
 	return nil
 }
@@ -71,9 +82,12 @@ func (i *Issuer) failure(root *os.Root, operation string, err error) error {
 	if i.retryUntil.After(now) {
 		data, _ := json.Marshal(retryState{Scope: i.retryScope(), Until: i.retryUntil})
 		saveErr := state.WriteFiles(root, 0o600, state.File{Name: ".retry-after", Data: data})
-		return errors.Join(safe, fmt.Errorf("acme: retry deferred until %s", i.retryUntil.UTC().Format(time.RFC3339)), saveErr)
+		return noQuickRetry{errors.Join(safe, fmt.Errorf("acme: retry deferred until %s", i.retryUntil.UTC().Format(time.RFC3339)), saveErr)}
 	}
-	return safe
+	if len(problems) > 0 {
+		return noQuickRetry{safe}
+	}
+	return safe // a transport error: the network or the CA not reachable yet
 }
 
 func acmeProblems(err error) []*acme.Error {

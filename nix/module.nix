@@ -242,12 +242,15 @@ in
       # rather than at the next timer: 30 s apart, at most five starts an hour, so whatever a run
       # lasts it gives up to the timer after four retries (ADR 0001 amendment). OnFailure= fires
       # only once systemd gives up. Consumers order `after`/`wants` hanko.service, never `requires`.
+      # Exit 10 (a validation failure, a CA deadline, a hanko-ca refusal) is not retried: a quick
+      # retry would only spend the CA's limits again; the unit fails and OnFailure= fires at once.
       startLimitIntervalSec = 3600;
       startLimitBurst = 5;
       serviceConfig = serviceConfig // {
         RemainAfterExit = true;
         Restart = "on-failure";
         RestartSec = "30s";
+        RestartPreventExitStatus = "10";
       };
     };
 

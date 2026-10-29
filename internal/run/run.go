@@ -24,6 +24,9 @@ import (
 	"github.com/scorsi/hanko/internal/logging"
 	"github.com/scorsi/hanko/internal/state"
 	"github.com/scorsi/hanko/internal/svid"
+
+	"google.golang.org/grpc/codes"
+	grpcstatus "google.golang.org/grpc/status"
 )
 
 // Bounds one certificate's order, propagation wait and validation included.
@@ -49,7 +52,9 @@ type Runner struct {
 }
 
 // Run handles every certificate and returns an error naming each one that was due and could
-// not be obtained or delivered. Pending reloads survive a crash and are retried without an order.
+// not be obtained or delivered. The error matches issuer.ErrNoQuickRetry when any certificate
+// failed for a reason a retry within minutes cannot fix (noQuickRetry), even if another one only
+// needs hanko-ca or the network to come up: a quick retry would order that first one again. Pending reloads survive a crash and are retried without an order.
 // A blocking flock on <state>/.lock serialises runs, so hanko.service and hanko-renew.service
 // never overlap (e.g. a persistent timer catching up at boot): the second waits, then finds
 // nothing due.
@@ -77,6 +82,7 @@ func (r *Runner) Run(ctx context.Context, certs []config.Certificate) error {
 	}
 
 	var errs []error
+	final := false
 	renewed := 0
 	last := lastRun{TS: time.Now().UTC(), Certificates: map[string]result{}}
 	for _, c := range certs {
@@ -86,6 +92,7 @@ func (r *Runner) Run(ctx context.Context, certs []config.Certificate) error {
 			r.Log.Error("", "event", "certificate-failed", "certificate", c.Name, "err", err)
 			errs = append(errs, fmt.Errorf("%s: %w", c.Name, err))
 			last.Certificates[c.Name] = result{Result: "failed", Err: err.Error()}
+			final = final || noQuickRetry(err)
 		}
 		if ok {
 			renewed++
@@ -100,7 +107,21 @@ func (r *Runner) Run(ctx context.Context, certs []config.Certificate) error {
 		errs = append(errs, err)
 	}
 	r.Log.Info("", "event", "run-completed", "certificates", len(certs), "renewed", renewed, "failed", failed, "dur_us", time.Since(start).Microseconds())
+	if final {
+		errs = append(errs, issuer.ErrNoQuickRetry)
+	}
 	return errors.Join(errs...)
+}
+
+// noQuickRetry reports whether a certificate's failure is one a retry within minutes cannot fix:
+// the ACME issuer's (issuer.ErrNoQuickRetry) or a refusal from hanko-ca (ADR 0004). Anything
+// else, hanko-ca or the network unreachable included, may be gone by the next attempt.
+func noQuickRetry(err error) bool {
+	switch grpcstatus.Code(err) {
+	case codes.InvalidArgument, codes.PermissionDenied, codes.FailedPrecondition:
+		return true
+	}
+	return errors.Is(err, issuer.ErrNoQuickRetry)
 }
 
 // groupID resolves a certificate's group by name or number (ADR 0009).

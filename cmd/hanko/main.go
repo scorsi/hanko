@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -15,6 +16,10 @@ import (
 	"github.com/scorsi/hanko/internal/run"
 	"github.com/scorsi/hanko/internal/svid"
 )
+
+// exitNoQuickRetry: some certificate failed for a reason a retry within minutes cannot fix
+// (issuer.ErrNoQuickRetry); the module sets RestartPreventExitStatus= to it (ADR 0001).
+const exitNoQuickRetry = 10
 
 const usage = `usage: hanko check|run|status <config.toml>
 
@@ -59,7 +64,9 @@ func main() {
 	if cfg.Internal != nil {
 		r.Internal = &svid.Client{Addr: cfg.Internal.CA}
 	}
-	if err := r.Run(ctx, cfg.Certificates); err != nil {
+	if err := r.Run(ctx, cfg.Certificates); errors.Is(err, issuer.ErrNoQuickRetry) {
+		os.Exit(exitNoQuickRetry) // already logged by Run (certificate-failed)
+	} else if err != nil {
 		os.Exit(1) // already logged by Run (certificate-failed or run-failed)
 	}
 }

@@ -134,6 +134,8 @@
             assert
               evaluated.systemd.services.hanko.serviceConfig.Restart == "on-failure"
               && evaluated.systemd.services.hanko.serviceConfig.RestartSec == "30s"
+              # Exit 10, cmd/hanko's exitNoQuickRetry, waits for the timer.
+              && evaluated.systemd.services.hanko.serviceConfig.RestartPreventExitStatus == "10"
               && evaluated.systemd.services.hanko.startLimitIntervalSec == 3600
               && evaluated.systemd.services.hanko.startLimitBurst == 5
               && !(evaluated.systemd.services.hanko-renew.serviceConfig ? Restart);

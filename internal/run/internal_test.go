@@ -3,6 +3,7 @@ package run
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/scorsi/hanko/internal/config"
+	"github.com/scorsi/hanko/internal/issuer"
 	"github.com/scorsi/hanko/internal/logging"
 	"github.com/scorsi/hanko/internal/svid"
 	"github.com/scorsi/hanko/internal/testutil"
@@ -119,7 +121,7 @@ func TestInternal(t *testing.T) {
 	other := api
 	other.SpiffeID = "spiffe://uchi.example.org/vm/git"
 	log.Reset()
-	if err := r.Run(ctx, []config.Certificate{other}); err == nil || !strings.Contains(err.Error(), "PermissionDenied") {
+	if err := r.Run(ctx, []config.Certificate{other}); !errors.Is(err, issuer.ErrNoQuickRetry) || !strings.Contains(err.Error(), "PermissionDenied") {
 		t.Fatalf("refused ID: %v", err)
 	}
 	if !bytes.Equal(read(t, r, "svid.pem"), current) || !strings.Contains(log.String(), `"event":"certificate-failed","certificate":"api"`) {
@@ -136,8 +138,8 @@ func TestInternalUnreachable(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.Internal = &svid.Client{Addr: "127.0.0.1:1"}
-	if err := r.Run(context.Background(), []config.Certificate{api}); err == nil {
-		t.Fatal("run succeeded without hanko-ca")
+	if err := r.Run(context.Background(), []config.Certificate{api}); err == nil || errors.Is(err, issuer.ErrNoQuickRetry) {
+		t.Fatalf("run without hanko-ca: %v, want a retryable failure", err)
 	}
 	line, err := status(t, r, api)
 	if err != nil || line["valid"] != true || line["last_result"] != "failed" {
