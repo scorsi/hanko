@@ -8,8 +8,10 @@ import (
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/pem"
 	"errors"
 	"math/big"
@@ -25,6 +27,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 )
 
@@ -55,7 +58,7 @@ func p256(t *testing.T) *ecdsa.PrivateKey {
 	return k
 }
 
-func caCert(t *testing.T, key *ecdsa.PrivateKey, cn string) []byte {
+func caCert(t *testing.T, key *ecdsa.PrivateKey, cn string, edit ...func(*x509.Certificate)) []byte {
 	t.Helper()
 	tmpl := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
@@ -65,6 +68,9 @@ func caCert(t *testing.T, key *ecdsa.PrivateKey, cn string) []byte {
 		KeyUsage:              x509.KeyUsageCertSign,
 		BasicConstraintsValid: true,
 		IsCA:                  true,
+	}
+	for _, e := range edit {
+		e(tmpl)
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, key.Public(), key)
 	if err != nil {
@@ -83,7 +89,7 @@ func keyPEM(t *testing.T, key crypto.Signer) []byte {
 }
 
 // newCA allows idAPI and idGit from 127.0.0.1 and idDB from fd12:3456:789a::3.
-func newCA(t *testing.T, log *bytes.Buffer) *CA {
+func newCA(t *testing.T, log *bytes.Buffer, edit ...func(*x509.Certificate)) *CA {
 	t.Helper()
 	cfg, err := ParseConfig([]byte(strings.Replace(example, `address = "fd12:3456:789a::2"`, `address = "127.0.0.1"`, 1) + `
 [[hosts]]
@@ -94,7 +100,7 @@ ids = ["` + idDB + `"]
 		t.Fatal(err)
 	}
 	key := p256(t)
-	c, err := New(cfg, keyPEM(t, key), caCert(t, key, "hanko test CA"), logging.New(log, nil))
+	c, err := New(cfg, keyPEM(t, key), caCert(t, key, "hanko test CA", edit...), logging.New(log, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,6 +138,10 @@ func TestConfigInvalid(t *testing.T) {
 		"unknown key":       {`svid_lifetime`, `svid_lifetme`, "unknown key"},
 		"relative key":      {`"/run/secrets/hanko-ca-key"`, `"secrets/key"`, "key_file"},
 		"wildcard listen":   {`[fd12:3456:789a::1]:4900`, `[::]:4900`, "listen"},
+		"mapped wildcard":   {`[fd12:3456:789a::1]:4900`, `[::ffff:0.0.0.0]:4900`, "listen"},
+		"mapped listen":     {`[fd12:3456:789a::1]:4900`, `[::ffff:10.0.0.1]:4900`, "listen"},
+		"mapped host any":   {`"fd12:3456:789a::2"`, `"::ffff:0.0.0.0"`, "address"},
+		"mapped host":       {`"fd12:3456:789a::2"`, `"::ffff:10.0.0.2"`, "address"},
 		"privileged port":   {`]:4900`, `]:443`, "listen"},
 		"bad lifetime":      {`"24h"`, `"0s"`, "svid_lifetime"},
 		"bad address":       {`"fd12:3456:789a::2"`, `"host.example.org"`, "address"},
@@ -223,6 +233,16 @@ func TestSignRefusedCSR(t *testing.T) {
 	_, ed, _ := ed25519.GenerateKey(rand.Reader)
 	badSig := csr(t, p256(t))
 	badSig[len(badSig)-3] ^= 0xff // inside the signature BIT STRING
+	rsaKey, _ := rsa.GenerateKey(rand.Reader, 2048)
+	rsaBadSig := csr(t, rsaKey)
+	rsaBadSig[len(rsaBadSig)-3] ^= 0xff // refused for its key, before any signature check
+	uri := asn1.RawValue{Class: asn1.ClassContextSpecific, Tag: 6, Bytes: []byte(idAPI)}
+	oidBytes, _ := asn1.Marshal(asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 99999, 1})
+	otherName := asn1.RawValue{Class: asn1.ClassContextSpecific, Tag: 0, IsCompound: true,
+		Bytes: append(oidBytes, 0xa0, 0x03, 0x0c, 0x01, 'x')}
+	dn, _ := asn1.Marshal(pkix.Name{CommonName: "api"}.ToRDNSequence())
+	dirName := asn1.RawValue{Class: asn1.ClassContextSpecific, Tag: 4, IsCompound: true, Bytes: dn}
+	regID := asn1.RawValue{Class: asn1.ClassContextSpecific, Tag: 8, Bytes: oidBytes[2:]}
 	withDNS := func() []byte {
 		der, _ := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{DNSNames: []string{"api.uchi.example.org"}}, p256(t))
 		return der
@@ -238,11 +258,79 @@ func TestSignRefusedCSR(t *testing.T) {
 		"mismatched SAN": {csr(t, p256(t), idGit), "SANs"},
 		"two URI SANs":   {csr(t, p256(t), idAPI, idGit), "SANs"},
 		"DNS SAN":        {withDNS, "SANs"},
+		"too large":      {make([]byte, maxCSR+1), "too large"},
+		"RSA key":        {rsaBadSig, "P-256"},
+		"otherName SAN":  {rawSAN(t, uri, otherName), "SANs"},
+		"directoryName":  {rawSAN(t, dirName, uri), "SANs"},
+		"registeredID":   {rawSAN(t, regID), "SANs"},
+		"same URI twice": {rawSAN(t, uri, uri), "SANs"},
 	} {
 		_, err := c.sign(local, tc.req, idAPI)
 		if err == nil || errors.Is(err, errDenied) || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: err = %v, want %q", name, err, tc.want)
 		}
+	}
+}
+
+// rawSAN builds a CSR whose subjectAltName holds exactly names. (A repeated extension is
+// refused by Go's parser itself.)
+func rawSAN(t *testing.T, names ...asn1.RawValue) []byte {
+	t.Helper()
+	ext := func(ns ...asn1.RawValue) pkix.Extension {
+		var b []byte
+		for _, n := range ns {
+			d, err := asn1.Marshal(n)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b = append(b, d...)
+		}
+		v, _ := asn1.Marshal(asn1.RawValue{Tag: asn1.TagSequence, IsCompound: true, Bytes: b})
+		return pkix.Extension{Id: oidSAN, Value: v}
+	}
+	exts := []pkix.Extension{ext(names...)}
+	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{ExtraExtensions: exts}, p256(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := x509.ParseCertificateRequest(der); err != nil {
+		t.Fatalf("Go must parse it, or the test proves nothing: %v", err)
+	}
+	return der
+}
+
+func TestCAValidity(t *testing.T) {
+	cfg, _ := ParseConfig([]byte(example))
+	key := p256(t)
+	for name, edit := range map[string]func(*x509.Certificate){
+		"expired":             func(c *x509.Certificate) { c.NotAfter = time.Now().Add(-time.Minute) },
+		"not yet valid":       func(c *x509.Certificate) { c.NotBefore = time.Now().Add(time.Hour) },
+		"no keyCertSign":      func(c *x509.Certificate) { c.KeyUsage = x509.KeyUsageDigitalSignature },
+		"no key usage at all": func(c *x509.Certificate) { c.KeyUsage = 0 },
+	} {
+		if _, err := New(cfg, keyPEM(t, key), caCert(t, key, "ca", edit), nil); err == nil || !strings.Contains(err.Error(), "signing CA") {
+			t.Errorf("%s: err = %v", name, err)
+		}
+	}
+
+	// The SVID ends with the CA; past the CA's end, signing is refused.
+	c := newCA(t, &bytes.Buffer{}, func(c *x509.Certificate) { c.NotAfter = time.Now().Add(time.Hour) })
+	der, err := c.sign(local, csr(t, p256(t)), idAPI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, _ := x509.ParseCertificate(der)
+	if !leaf.NotAfter.Equal(c.cert.NotAfter) {
+		t.Errorf("NotAfter %v, want the CA's %v", leaf.NotAfter, c.cert.NotAfter)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(c.cert)
+	if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots}); err != nil {
+		t.Errorf("clamped SVID: %v", err)
+	}
+	c.now = func() time.Time { return c.cert.NotAfter.Add(time.Second) }
+	if _, err := c.sign(local, csr(t, p256(t)), idAPI); !errors.Is(err, errExpired) {
+		t.Errorf("after the CA's end: err = %v", err)
 	}
 }
 
@@ -278,9 +366,8 @@ func TestGRPC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := grpc.NewServer()
-	cav1.RegisterCAServiceServer(srv, c)
-	go srv.Serve(lis)
+	srv := newServer(c)
+	go srv.Serve(limitListener(lis, maxConns))
 	t.Cleanup(srv.Stop)
 	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -316,8 +403,68 @@ func TestGRPC(t *testing.T) {
 		t.Fatalf("mismatched SAN: %v", err)
 	}
 
+	// A message above maxRecvMsg never reaches the handler.
+	_, err = client.Sign(ctx, &cav1.SignRequest{Csr: make([]byte, maxRecvMsg+1), SpiffeId: idAPI})
+	if status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("oversized request: %v", err)
+	}
+
 	b, err := client.Bundle(ctx, &cav1.BundleRequest{})
 	if err != nil || len(b.Bundle) != 1 || !bytes.Equal(b.Bundle[0], c.cert.Raw) {
 		t.Fatalf("bundle: %v", err)
+	}
+
+	// Bundle answers configured hosts only (the peer is set directly: loopback is configured).
+	other := peer.NewContext(ctx, &peer.Peer{Addr: &net.TCPAddr{IP: net.ParseIP("127.0.0.2"), Port: 4000}})
+	if _, err := c.Bundle(other, &cav1.BundleRequest{}); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("bundle from an unknown address: %v", err)
+	}
+	if !strings.Contains(log.String(), `"level":"warn","v":1,"event":"bundle-refused","peer":"127.0.0.2"`) {
+		t.Errorf("no bundle-refused line: %s", log.String())
+	}
+}
+
+func TestLimitListener(t *testing.T) {
+	inner, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lis := limitListener(inner, 1)
+	defer lis.Close()
+	for range 2 {
+		c, err := net.Dial("tcp", inner.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+	}
+	first, err := lis.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := make(chan net.Conn, 1)
+	go func() {
+		c, _ := lis.Accept()
+		second <- c
+	}()
+	select {
+	case <-second:
+		t.Fatal("a second connection was accepted while the only slot is taken")
+	case <-time.After(100 * time.Millisecond):
+	}
+	first.Close()
+	first.Close() // a double close frees the slot once
+	select {
+	case c := <-second:
+		if c == nil {
+			t.Fatal("accept failed")
+		}
+		c.Close()
+	case <-time.After(5 * time.Second):
+		t.Fatal("closing the first connection did not free its slot")
+	}
+	lis.Close()
+	if _, err := lis.Accept(); !errors.Is(err, net.ErrClosed) {
+		t.Errorf("accept after close: %v", err)
 	}
 }

@@ -88,8 +88,8 @@ func (c *Config) validate() error {
 		}
 	}
 	// ADR 0005: the overlay address only, above 1024.
-	if ap, err := netip.ParseAddrPort(c.CA.Listen); err != nil || ap.Addr().IsUnspecified() || ap.Addr().Zone() != "" || ap.Port() <= 1024 {
-		add("ca: listen must be a specific IP address with a port above 1024")
+	if ap, err := netip.ParseAddrPort(c.CA.Listen); err != nil || !specific(ap.Addr()) || ap.Port() <= 1024 {
+		add("ca: listen must be a specific IP address (an IPv4 one in IPv4 form) with a port above 1024")
 	}
 	if d, err := time.ParseDuration(c.CA.SVIDLifetime); err != nil || d <= 0 {
 		add("ca: svid_lifetime must be a positive duration such as \"24h\"")
@@ -103,8 +103,8 @@ func (c *Config) validate() error {
 		at := fmt.Sprintf("hosts[%d]", i)
 		a, err := netip.ParseAddr(h.Address)
 		switch {
-		case err != nil || a.IsUnspecified() || a.Zone() != "":
-			add("%s: address must be a specific IP address", at)
+		case err != nil || !specific(a):
+			add("%s: address must be a specific IP address, an IPv4 one in IPv4 form", at)
 		case seen[a.Unmap()]:
 			add("%s: duplicate address", at)
 		default:
@@ -127,6 +127,12 @@ func (c *Config) validate() error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// specific refuses the wildcard, zones and IPv4-mapped IPv6 forms ([::ffff:0.0.0.0] would
+// otherwise pass IsUnspecified); peers are compared unmapped, so IPv4 is written as IPv4.
+func specific(a netip.Addr) bool {
+	return !a.Is4In6() && !a.Unmap().IsUnspecified() && a.Zone() == ""
 }
 
 // parseID checks a SPIFFE ID of the form spiffe://<trust domain>/<host>/<service> (ADR 0004)

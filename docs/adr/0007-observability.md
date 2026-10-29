@@ -59,5 +59,6 @@ The deployment pins hanko's ACME account in its CAA records (RFC 8657 `accountur
 | `ca-started` (listening) | info | `listen`, `hosts` (count), `ca_not_after` |
 | `ca-failed` (key, certificate or listener unusable, or serving stopped on an error) | error | `err` |
 | `svid-signed` | info | `peer`, `spiffe_id`, `serial` (hex), `not_after` |
-| `sign-refused` (ID not allowed for the address, or a CSR refused; `spiffe_id` cut at 256 bytes) | warn | `peer`, `spiffe_id`, `err` |
+| `sign-refused` (ID not allowed for the address, a CSR refused, or the CA certificate expired; `spiffe_id` cut at 256 bytes) | warn | `peer`, `spiffe_id`, `err` |
+| `bundle-refused` (`Bundle()` from an address not in `hosts`) | warn | `peer`, `err` |
 | `grpc-error` (an error line of grpc-go) | error | `err` |
