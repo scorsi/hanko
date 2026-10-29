@@ -51,3 +51,14 @@ nothing in the state directory recorded it.
 - The state directory gains one owner-only file; restoring it from a backup is harmless.
 - Monitoring runs `hanko status` as `hanko`, e.g. from a unit with `User=hanko`; wiring it is the
   deployment's job.
+
+## Amendment 2026-10-29: internal certificates
+
+For a certificate of the `internal` issuer (ADR 0004), `status` reads `svid.pem`, `key.pem` and
+`bundle.pem`. The line carries `spiffe_id` (the SVID's URI SAN) instead of `hosts`, and two more
+fields: `ca_not_after`, the expiry of the bundle's CA that signed the SVID, and `ca_expiring`,
+true when that is less than **30 days** away, which raises the line to `warn` without changing
+the exit status. Thirty days because the rotation of ADR 0012 needs at least two days (the new
+CA in every bundle for more than one SVID lifetime, then one more lifetime on the new key) and
+an owner checking monthly still has room to plan it. An SVID that no CA of the bundle signed is
+not valid (`reason`: "not signed by a CA of the bundle"): its consumers' peers would reject it.

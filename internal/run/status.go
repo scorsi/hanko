@@ -15,10 +15,16 @@ import (
 	"github.com/scorsi/hanko/internal/config"
 	"github.com/scorsi/hanko/internal/logging"
 	"github.com/scorsi/hanko/internal/state"
+	"github.com/scorsi/hanko/internal/svid"
 )
 
 // lastRunFile holds the outcome of the last run that held the lock (ADR 0011).
 const lastRunFile = ".last-run"
+
+// caWarning: status warns when the CA that signed an SVID expires within it. The rotation of
+// ADR 0012 takes at least two days (the new CA in the bundle for more than one SVID lifetime,
+// then one more lifetime on the new key); a month leaves room to notice and plan it.
+const caWarning = 30 * 24 * time.Hour
 
 type lastRun struct {
 	TS           time.Time         `json:"ts"`
@@ -54,9 +60,20 @@ func Status(stateDir string, certs []config.Certificate, log *slog.Logger) error
 	var invalid []error
 	for _, c := range certs {
 		attrs := []any{"event", "certificate-status", "certificate", c.Name, "issuer", c.Issuer}
-		leaf, reason := current(root, c)
-		if leaf != nil {
+		leaf, ca, reason := current(root, c)
+		switch {
+		case leaf != nil && c.Issuer == "internal":
+			id := ""
+			if len(leaf.URIs) == 1 {
+				id = leaf.URIs[0].String()
+			}
+			attrs = append(attrs, "spiffe_id", id, "not_after", leaf.NotAfter.UTC().Format(logging.TS))
+		case leaf != nil:
 			attrs = append(attrs, "hosts", leaf.DNSNames, "not_after", leaf.NotAfter.UTC().Format(logging.TS))
+		}
+		caExpiring := ca != nil && time.Until(ca.NotAfter) < caWarning
+		if ca != nil {
+			attrs = append(attrs, "ca_not_after", ca.NotAfter.UTC().Format(logging.TS), "ca_expiring", caExpiring)
 		}
 		attrs = append(attrs, "valid", reason == "")
 		if reason != "" {
@@ -75,6 +92,9 @@ func Status(stateDir string, certs []config.Certificate, log *slog.Logger) error
 			level = slog.LevelWarn
 			attrs = append(attrs, "err", res.Err) // err only at warn or error (ADR 0007)
 		}
+		if caExpiring {
+			level = slog.LevelWarn
+		}
 		if reason != "" {
 			level = slog.LevelError
 		}
@@ -83,41 +103,50 @@ func Status(stateDir string, certs []config.Certificate, log *slog.Logger) error
 	return errors.Join(invalid...)
 }
 
-// current returns the published leaf, if it parses, and why the pair cannot be served now ("" if it can).
-func current(root *os.Root, c config.Certificate) (*x509.Certificate, string) {
+// current returns the published leaf, if it parses, the bundle's CA that signed it (internal
+// issuer only), and why the pair cannot be served now ("" if it can).
+func current(root *os.Root, c config.Certificate) (leaf, ca *x509.Certificate, reason string) {
 	gid, err := groupID(c.Group)
 	if err != nil {
-		return nil, err.Error()
+		return nil, nil, err.Error()
 	}
 	dir, err := state.Directory(root, c.Name, gid, true)
 	if err != nil {
-		return nil, err.Error()
+		return nil, nil, err.Error()
 	}
 	defer dir.Close()
-	chain, err := state.ReadOptional(dir, "fullchain.pem", 0o640, gid)
+	chain, err := state.ReadOptional(dir, certFile(c), 0o640, gid)
 	if err != nil {
-		return nil, err.Error()
+		return nil, nil, err.Error()
 	}
 	key, err := state.ReadOptional(dir, "key.pem", 0o640, gid)
 	if err != nil {
-		return nil, err.Error()
+		return nil, nil, err.Error()
 	}
 	if chain == nil {
-		return nil, "absent"
+		return nil, nil, "absent"
 	}
 	block, _ := pem.Decode(chain)
 	if block == nil {
-		return nil, "unreadable"
+		return nil, nil, "unreadable"
 	}
-	leaf, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		return nil, "unreadable"
+	if leaf, err = x509.ParseCertificate(block.Bytes); err != nil {
+		return nil, nil, "unreadable"
+	}
+	if c.Issuer == "internal" {
+		bundle, err := state.ReadOptional(dir, "bundle.pem", 0o640, gid)
+		if err != nil {
+			return leaf, nil, err.Error()
+		}
+		if ca = svid.SigningCA(leaf, bundle); ca == nil {
+			return leaf, nil, "not signed by a CA of the bundle"
+		}
 	}
 	if _, err := tls.X509KeyPair(chain, key); err != nil {
-		return leaf, "key absent or not matching the certificate"
+		return leaf, ca, "key absent or not matching the certificate"
 	}
 	if now := time.Now(); now.Before(leaf.NotBefore) || !now.Before(leaf.NotAfter) {
-		return leaf, "expired or not yet valid"
+		return leaf, ca, "expired or not yet valid"
 	}
-	return leaf, ""
+	return leaf, ca, ""
 }

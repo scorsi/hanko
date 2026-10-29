@@ -169,7 +169,7 @@ func (c *CA) sign(from netip.Addr, csrDER []byte, id string) ([]byte, error) {
 	if !onlyURI(csr.Extensions, id) {
 		return nil, errors.New("csr: SANs other than the requested spiffe_id")
 	}
-	u, _ := url.Parse(id) // valid: every allowed ID passed parseID
+	u, _ := url.Parse(id) // valid: every allowed ID passed ParseID
 	start := now.Add(-backdate)
 	end := start.Add(c.lifetime)
 	if end.After(c.cert.NotAfter) {

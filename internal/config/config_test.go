@@ -43,22 +43,52 @@ group = "genkan"
 hosts = ["uchi.example.org"]
 `
 
+const internalTable = `
+[internal]
+ca = "[fd12:3456:789a::1]:4900"
+`
+
+const apiCert = `
+[[certificates]]
+name = "api"
+issuer = "internal"
+group = "api"
+spiffe_id = "spiffe://uchi.example.org/vm/api"
+reload = ["api.service"]
+`
+
+// TestInternal: the v1 example of ADR 0002, alone and next to ACME certificates.
+func TestInternal(t *testing.T) {
+	for _, data := range []string{internalTable + apiCert, head + home + internalTable + apiCert} {
+		c, err := Parse([]byte(data))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.Internal.CA != "[fd12:3456:789a::1]:4900" || c.Certificates[len(c.Certificates)-1].SpiffeID != "spiffe://uchi.example.org/vm/api" {
+			t.Fatalf("unexpected decode: %+v", c)
+		}
+	}
+}
+
 func TestInvalid(t *testing.T) {
 	cases := map[string]struct{ toml, want string }{
-		"unknown top key":    {head + home + "bogus = 1\n", "bogus"},
-		"unknown table key":  {strings.Replace(head, "directory", "directry", 1) + home, "directry"},
-		"unknown cert key":   {head + home + "hsots = []\n", "hsots"},
-		"spiffe_id on acme":  {head + home + `spiffe_id = "spiffe://uchi.example.org/vm/a"` + "\n", "spiffe_id"},
-		"unused acme":        {head, "acme: table unused"},
-		"missing acme":       {home, "acme: table required"},
-		"duplicate name":     {head + home + home, "duplicate name"},
-		"bad name":           {head + strings.Replace(home, `"home"`, `"Home_1"`, 1), "name must match"},
-		"unknown issuer":     {head + strings.Replace(home, `"acme"`, `"foo"`, 1), "unknown issuer"},
-		"internal issuer v1": {head + home + "[[certificates]]\nname = \"api\"\nissuer = \"internal\"\nspiffe_id = \"spiffe://uchi.example.org/vm/api\"\n", "v1"},
-		"internal table v1":  {head + home + "[internal]\nca = \"[fd12::1]:4900\"\n", "internal"},
-		"no hosts":           {head + "[[certificates]]\nname = \"a\"\nissuer = \"acme\"\n", "needs hosts"},
-		"bad nameserver":     {strings.Replace(head, "203.0.113.10:53", "203.0.113.10", 1) + home, "nameserver"},
-		"bad timeout":        {strings.Replace(head, "30s", "soon", 1) + home, "propagation_timeout"},
+		"unknown top key":   {head + home + "bogus = 1\n", "bogus"},
+		"unknown table key": {strings.Replace(head, "directory", "directry", 1) + home, "directry"},
+		"unknown cert key":  {head + home + "hsots = []\n", "hsots"},
+		"spiffe_id on acme": {head + home + `spiffe_id = "spiffe://uchi.example.org/vm/a"` + "\n", "spiffe_id"},
+		"unused acme":       {head, "acme: table unused"},
+		"missing acme":      {home, "acme: table required"},
+		"duplicate name":    {head + home + home, "duplicate name"},
+		"bad name":          {head + strings.Replace(home, `"home"`, `"Home_1"`, 1), "name must match"},
+		"unknown issuer":    {head + strings.Replace(home, `"acme"`, `"foo"`, 1), "unknown issuer"},
+		"unused internal":   {head + home + internalTable, "internal: table unused"},
+		"missing internal":  {apiCert, "internal: table required"},
+		"bad internal ca":   {strings.Replace(internalTable, ":4900", "", 1) + apiCert, "internal: ca"},
+		"bad spiffe_id":     {internalTable + strings.Replace(apiCert, "/vm/api", "/api", 1), "spiffe_id"},
+		"hosts on internal": {internalTable + apiCert + "hosts = [\"a.example.org\"]\n", "hosts belong"},
+		"no hosts":          {head + "[[certificates]]\nname = \"a\"\nissuer = \"acme\"\n", "needs hosts"},
+		"bad nameserver":    {strings.Replace(head, "203.0.113.10:53", "203.0.113.10", 1) + home, "nameserver"},
+		"bad timeout":       {strings.Replace(head, "30s", "soon", 1) + home, "propagation_timeout"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

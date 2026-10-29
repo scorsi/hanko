@@ -29,6 +29,13 @@
       reload = [ "genkan.service" ];
       group = "genkan";
     };
+    internal.ca = "[fd12:3456:789a::1]:4900";
+    certificates.api = {
+      issuer = "internal";
+      spiffeId = "spiffe://uchi.example.org/vm/api";
+      reload = [ "api.service" ];
+      group = "api";
+    };
   };
 
   services.hanko-ca = {
@@ -43,4 +50,5 @@
   };
 
   users.groups.genkan = { };
+  users.groups.api = { };
 }

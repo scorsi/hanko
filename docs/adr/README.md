@@ -15,3 +15,4 @@ MADR-lite, as in annai: one decision per file, `NNNN-slug.md`, sections Context 
 | [0009](0009-state-and-delivery-safety.md) | Verify state and persist delivery failures |
 | [0010](0010-acme-retry-deadlines.md) | Persist CA retry deadlines across oneshots |
 | [0011](0011-status.md) | `hanko status` and the persisted last run result |
+| [0012](0012-ca-rotation.md) | CA rotation for `hanko-ca` (proposed) |

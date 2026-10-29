@@ -114,7 +114,7 @@ func (c *Config) validate() error {
 			add("%s: ids must not be empty", at)
 		}
 		for j, id := range h.IDs {
-			td, err := parseID(id)
+			td, err := ParseID(id)
 			switch {
 			case err != nil:
 				add("%s: ids[%d]: %v", at, j, err)
@@ -135,9 +135,9 @@ func specific(a netip.Addr) bool {
 	return !a.Is4In6() && !a.Unmap().IsUnspecified() && a.Zone() == ""
 }
 
-// parseID checks a SPIFFE ID of the form spiffe://<trust domain>/<host>/<service> (ADR 0004)
+// ParseID checks a SPIFFE ID of the form spiffe://<trust domain>/<host>/<service> (ADR 0004)
 // with the character rules of the SPIFFE ID standard, and returns its trust domain.
-func parseID(id string) (string, error) {
+func ParseID(id string) (string, error) {
 	bad := errors.New("must be spiffe://<trust domain>/<host>/<service>")
 	u, err := url.Parse(id)
 	if err != nil || u.Scheme != "spiffe" || u.Opaque != "" || u.User != nil || u.Port() != "" ||

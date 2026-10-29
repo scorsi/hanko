@@ -1,0 +1,185 @@
+package run
+
+import (
+	"bytes"
+	"context"
+	"crypto/tls"
+	"os"
+	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/scorsi/hanko/internal/config"
+	"github.com/scorsi/hanko/internal/logging"
+	"github.com/scorsi/hanko/internal/svid"
+	"github.com/scorsi/hanko/internal/testutil"
+)
+
+const idAPI = "spiffe://uchi.example.org/vm/api"
+
+var api = config.Certificate{Name: "api", Group: strconv.Itoa(os.Getegid()), Issuer: "internal", SpiffeID: idAPI, Reload: []string{"api.service"}}
+
+// internalSetup is a state directory with the api certificate directory and a runner whose
+// reloads check that svid.pem, key.pem and bundle.pem are in place.
+func internalSetup(t *testing.T, addr string) (*Runner, *bytes.Buffer, *[]string) {
+	state := testutil.StateDir(t)
+	dir := filepath.Join(state, "api")
+	if err := os.Mkdir(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	testutil.SetgidDir(t, dir)
+	var log bytes.Buffer
+	var reloads []string
+	r := &Runner{Internal: &svid.Client{Addr: addr}, StateDir: state, Log: logging.New(&log, nil)}
+	r.Reload = func(_ context.Context, unit string) error {
+		s, _ := os.ReadFile(filepath.Join(dir, "svid.pem"))
+		b, _ := os.ReadFile(filepath.Join(dir, "bundle.pem"))
+		if _, err := tls.LoadX509KeyPair(filepath.Join(dir, "svid.pem"), filepath.Join(dir, "key.pem")); err != nil || svid.Due(s, b, idAPI, time.Now()) != "" {
+			t.Errorf("reload of %s before the files were in place: %v", unit, err)
+		}
+		reloads = append(reloads, unit)
+		return nil
+	}
+	return r, &log, &reloads
+}
+
+func read(t *testing.T, r *Runner, name string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(r.StateDir, "api", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+// TestInternal follows an SVID through issuance, an idle run and the CA rotation of ADR 0012:
+// the bundle alone is refreshed and delivered on every run, and the SVID is renewed once its
+// CA leaves the bundle.
+func TestInternal(t *testing.T) {
+	ctx := context.Background()
+	key, cert := testutil.CACert(t, time.Now().Add(365*24*time.Hour))
+	r, log, reloads := internalSetup(t, testutil.ServeCA(t, key, cert, "24h", idAPI))
+	if err := r.Run(ctx, []config.Certificate{api}); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"svid.pem", "key.pem", "bundle.pem"} {
+		if info, err := os.Stat(filepath.Join(r.StateDir, "api", f)); err != nil || info.Mode().Perm() != 0o640 {
+			t.Fatalf("%s: %v %v", f, info, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(r.StateDir, "api", ".reload-pending")); !os.IsNotExist(err) {
+		t.Fatalf(".reload-pending left: %v", err)
+	}
+	first := read(t, r, "svid.pem")
+	if !bytes.Equal(read(t, r, "bundle.pem"), cert) || !slices.Equal(*reloads, []string{"api.service"}) ||
+		!strings.Contains(log.String(), `"event":"certificate-renewing","certificate":"api","reason":"absent","spiffe_id":"`+idAPI+`"`) {
+		t.Fatalf("first run: reloads %v, log %s", *reloads, log)
+	}
+
+	// Nothing due, same bundle: no request but Bundle, no reload.
+	log.Reset()
+	if err := r.Run(ctx, []config.Certificate{api}); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(read(t, r, "svid.pem"), first) || len(*reloads) != 1 || !strings.Contains(log.String(), `"event":"certificate-valid"`) ||
+		strings.Contains(log.String(), "bundle-written") {
+		t.Fatalf("idle run: reloads %v, log %s", *reloads, log)
+	}
+
+	// Rotation (a): the next CA joins cert_file. The bundle alone changes and is delivered.
+	nextKey, next := testutil.CACert(t, time.Now().Add(2*365*24*time.Hour))
+	r.Internal = &svid.Client{Addr: testutil.ServeCA(t, key, append(slices.Clip(cert), next...), "24h", idAPI)}
+	log.Reset()
+	if err := r.Run(ctx, []config.Certificate{api}); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(read(t, r, "svid.pem"), first) || !bytes.Equal(read(t, r, "bundle.pem"), append(slices.Clip(cert), next...)) ||
+		len(*reloads) != 2 || !strings.Contains(log.String(), `"event":"bundle-written","certificate":"api"`) {
+		t.Fatalf("new bundle: reloads %v, log %s", *reloads, log)
+	}
+
+	// (b): the next key signs; the old SVID still verifies against the old CA in the bundle.
+	r.Internal = &svid.Client{Addr: testutil.ServeCA(t, nextKey, append(slices.Clip(cert), next...), "24h", idAPI)}
+	if err := r.Run(ctx, []config.Certificate{api}); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(read(t, r, "svid.pem"), first) || !bytes.Equal(read(t, r, "bundle.pem"), append(slices.Clip(next), cert...)) {
+		t.Fatal("step (b) renewed the SVID or kept the old bundle")
+	}
+
+	// The old CA removed: the SVID it signed no longer verifies and is renewed by the new key.
+	r.Internal = &svid.Client{Addr: testutil.ServeCA(t, nextKey, next, "24h", idAPI)}
+	log.Reset()
+	if err := r.Run(ctx, []config.Certificate{api}); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(read(t, r, "svid.pem"), first) || !bytes.Equal(read(t, r, "bundle.pem"), next) ||
+		!strings.Contains(log.String(), `"reason":"not signed by a CA of the bundle"`) {
+		t.Fatalf("old CA removed: log %s", log)
+	}
+
+	// An ID this address may not request is refused; the published SVID stays.
+	current := read(t, r, "svid.pem")
+	other := api
+	other.SpiffeID = "spiffe://uchi.example.org/vm/git"
+	log.Reset()
+	if err := r.Run(ctx, []config.Certificate{other}); err == nil || !strings.Contains(err.Error(), "PermissionDenied") {
+		t.Fatalf("refused ID: %v", err)
+	}
+	if !bytes.Equal(read(t, r, "svid.pem"), current) || !strings.Contains(log.String(), `"event":"certificate-failed","certificate":"api"`) {
+		t.Fatalf("refused ID: log %s", log)
+	}
+}
+
+// TestInternalUnreachable: a run that cannot reach hanko-ca fails, even with a valid SVID, so
+// a stale bundle is noticed (OnFailure); the files stay.
+func TestInternalUnreachable(t *testing.T) {
+	key, cert := testutil.CACert(t, time.Now().Add(365*24*time.Hour))
+	r, _, _ := internalSetup(t, testutil.ServeCA(t, key, cert, "24h", idAPI))
+	if err := r.Run(context.Background(), []config.Certificate{api}); err != nil {
+		t.Fatal(err)
+	}
+	r.Internal = &svid.Client{Addr: "127.0.0.1:1"}
+	if err := r.Run(context.Background(), []config.Certificate{api}); err == nil {
+		t.Fatal("run succeeded without hanko-ca")
+	}
+	line, err := status(t, r, api)
+	if err != nil || line["valid"] != true || line["last_result"] != "failed" {
+		t.Fatalf("status: %v %v", err, line)
+	}
+}
+
+// TestInternalNearCAEnd: an SVID capped at its CA's end is not renewed on every run, and
+// status warns that the CA expires soon.
+func TestInternalNearCAEnd(t *testing.T) {
+	key, cert := testutil.CACert(t, time.Now().Add(10*time.Minute))
+	r, log, _ := internalSetup(t, testutil.ServeCA(t, key, cert, "24h", idAPI))
+	for range 2 {
+		if err := r.Run(context.Background(), []config.Certificate{api}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := strings.Count(log.String(), `"event":"certificate-written"`); n != 1 {
+		t.Fatalf("%d issuances: %s", n, log)
+	}
+	line, err := status(t, r, api)
+	if err != nil || line["level"] != "warn" || line["valid"] != true || line["ca_expiring"] != true ||
+		line["spiffe_id"] != idAPI || line["ca_not_after"] == nil || line["issuer"] != "internal" {
+		t.Fatalf("status: %v %v", err, line)
+	}
+}
+
+func TestInternalStatus(t *testing.T) {
+	key, cert := testutil.CACert(t, time.Now().Add(365*24*time.Hour))
+	r, _, _ := internalSetup(t, testutil.ServeCA(t, key, cert, "24h", idAPI))
+	if err := r.Run(context.Background(), []config.Certificate{api}); err != nil {
+		t.Fatal(err)
+	}
+	line, err := status(t, r, api)
+	if err != nil || line["level"] != "info" || line["valid"] != true || line["ca_expiring"] != false || line["spiffe_id"] != idAPI || line["hosts"] != nil {
+		t.Fatalf("status: %v %v", err, line)
+	}
+}

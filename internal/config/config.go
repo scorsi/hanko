@@ -15,11 +15,14 @@ import (
 	"time"
 
 	"github.com/pelletier/go-toml/v2"
+
+	"github.com/scorsi/hanko/internal/ca"
 )
 
 type Config struct {
 	ACME         *ACME         `toml:"acme"`
 	DNS          *DNS          `toml:"dns"`
+	Internal     *Internal     `toml:"internal"`
 	Certificates []Certificate `toml:"certificates"`
 }
 
@@ -40,8 +43,13 @@ type DNS struct {
 	PropagationTimeout string   `toml:"propagation_timeout"`
 }
 
-// Certificate holds the keys of every issuer so that a mismatch is reported by name; the
-// internal issuer's spiffe_id is parsed only to be rejected (v1, ADR 0004).
+// Internal is the internal issuer's table (ADR 0002, ADR 0004).
+type Internal struct {
+	// CA is hanko-ca's overlay address, host:port.
+	CA string `toml:"ca"`
+}
+
+// Certificate holds the keys of every issuer so that a mismatch is reported by name.
 type Certificate struct {
 	Name     string   `toml:"name"`
 	Issuer   string   `toml:"issuer"`
@@ -78,7 +86,7 @@ func Load(path string) (*Config, error) {
 	return Parse(data)
 }
 
-// Parse decodes TOML (unknown keys are errors, which also rejects the v1 [internal] table) and validates it.
+// Parse decodes TOML (unknown keys are errors) and validates it.
 func Parse(data []byte) (*Config, error) {
 	c := &Config{}
 	dec := toml.NewDecoder(strings.NewReader(string(data)))
@@ -108,7 +116,7 @@ func (c *Config) validate() error {
 	add := func(format string, a ...any) { errs = append(errs, fmt.Errorf(format, a...)) }
 
 	seen := map[string]bool{}
-	acmeUsed := false
+	acmeUsed, internalUsed := false, false
 	for i, cert := range c.Certificates {
 		at := fmt.Sprintf("certificates[%d]", i)
 		if nameRE.MatchString(cert.Name) {
@@ -146,9 +154,15 @@ func (c *Config) validate() error {
 				add("%s: spiffe_id belongs to the internal issuer, not acme", at)
 			}
 		case "internal":
-			add("%s: issuer internal is v1 and not supported by this version", at)
+			internalUsed = true
+			if _, err := ca.ParseID(cert.SpiffeID); err != nil {
+				add("%s: spiffe_id: %v", at, err)
+			}
+			if len(cert.Hosts) != 0 {
+				add("%s: hosts belong to the acme issuer, not internal", at)
+			}
 		default:
-			add("%s: unknown issuer (want acme)", at)
+			add("%s: unknown issuer (want acme or internal)", at)
 		}
 	}
 
@@ -181,6 +195,16 @@ func (c *Config) validate() error {
 		if c.DNS != nil {
 			add("dns: table unused, no certificate has issuer acme")
 		}
+	}
+	switch {
+	case internalUsed && c.Internal == nil:
+		add("internal: table required by internal certificates")
+	case internalUsed:
+		if ap, err := netip.ParseAddrPort(c.Internal.CA); err != nil || ap.Port() == 0 || ap.Addr().Zone() != "" {
+			add("internal: ca must be a numeric IP address with port 1..65535")
+		}
+	case c.Internal != nil:
+		add("internal: table unused, no certificate has issuer internal")
 	}
 	return errors.Join(errs...)
 }

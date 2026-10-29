@@ -46,11 +46,11 @@ Each milestone ends with a passing `nixosTest` (ADR-0001). Versions: v0 = public
 Opened by the owner on 2026-10-29: two consumers now need service identity, hikyaku (log shipping) and azukari (storage and backup), whose calls are authorised on the caller's SPIFFE ID. The formats were fixed in ADR-0004 so that v0 files never change.
 
 - ~~`hanko-ca`: daemon holding the CA key, gRPC `Sign` and `Bundle` under `proto/hanko/ca/v1/` with buf, overlay-address to allowed-IDs mapping, static user and hardening (ADR-0004, ADR-0005). NixOS module `ca`~~: done; unit and loopback gRPC tests, `module-eval` covers the `ca` module.
-- `internal` issuer in `hanko`: CSR with the SPIFFE ID as URI SAN, `svid.pem`, `key.pem`, `bundle.pem`, 24 h lifetime renewed at half.
+- ~~`internal` issuer in `hanko`: CSR with the SPIFFE ID as URI SAN, `svid.pem`, `key.pem`, `bundle.pem`, 24 h lifetime renewed at half~~: done; renewal at half of the SVID's real lifetime (capped at the CA's end), bundle refreshed on every run, `hanko status` shows SVIDs and warns 30 days before the signing CA expires (ADR 0011 amendment); unit tests against an in-process `hanko-ca`.
 - `nixosTest`: `hanko-ca` on one VM, `hanko` on two others, a service on each authenticating the other by SPIFFE ID over mTLS; a request for an ID not allowed for the caller's address is refused; the bundle is refreshed on every run.
 - Deployment side: `tcp/4900` allowed from every hanko host in kekkai's per-peer rules; the node carrying `hanko-ca` chosen and its risk recorded privately.
 - Done when: two services on two hosts authenticate each other by SPIFFE ID, and a rotation happens through the timer without a restart of either.
 
 ## Not planned
 
-`hanko-agent` and the Workload API (reserved in ADR-0001), JWT-SVIDs, federation, CA rotation procedures, HTTP-01, TLS-ALPN-01, any registrar API, any listening socket in `hanko`.
+`hanko-agent` and the Workload API (reserved in ADR-0001), JWT-SVIDs, federation, automated CA rotation (the manual procedure is ADR 0012), HTTP-01, TLS-ALPN-01, any registrar API, any listening socket in `hanko`.

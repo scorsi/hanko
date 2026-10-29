@@ -13,6 +13,7 @@ import (
 	"github.com/scorsi/hanko/internal/issuer"
 	"github.com/scorsi/hanko/internal/logging"
 	"github.com/scorsi/hanko/internal/run"
+	"github.com/scorsi/hanko/internal/svid"
 )
 
 const usage = `usage: hanko check|run|status <config.toml>
@@ -54,6 +55,9 @@ func main() {
 	r := &run.Runner{StateDir: state, Reload: run.Systemctl, Log: log}
 	if cfg.ACME != nil {
 		r.Issuer = &issuer.Issuer{ACME: *cfg.ACME, DNSConfig: *cfg.DNS, Log: log}
+	}
+	if cfg.Internal != nil {
+		r.Internal = &svid.Client{Addr: cfg.Internal.CA}
 	}
 	if err := r.Run(ctx, cfg.Certificates); err != nil {
 		os.Exit(1) // already logged by Run (certificate-failed or run-failed)

@@ -32,28 +32,41 @@ let
   };
   reloadUnits = lib.unique (lib.concatMap (c: c.reload) (lib.attrValues cfg.certificates));
 
-  generated = {
-    acme = {
-      directory = cfg.acme.directory;
-      account_key_file = cfg.acme.accountKeyFile;
-      accept_terms = cfg.acme.acceptTerms;
-      create_account = cfg.acme.createAccount;
+  # Only the issuer tables some certificate uses: `hanko check` rejects an unused one (ADR 0002).
+  uses = issuer: lib.any (c: c.issuer == issuer) (lib.attrValues cfg.certificates);
+  generated =
+    lib.optionalAttrs (uses "acme") {
+      acme = {
+        directory = cfg.acme.directory;
+        account_key_file = cfg.acme.accountKeyFile;
+        accept_terms = cfg.acme.acceptTerms;
+        create_account = cfg.acme.createAccount;
+      };
+      dns = {
+        nameservers = cfg.dns.nameservers;
+        tsig_key_file = cfg.dns.tsigKeyFile;
+        propagation_timeout = cfg.dns.propagationTimeout;
+      };
+    }
+    // lib.optionalAttrs (uses "internal") {
+      internal.ca = cfg.internal.ca;
+    }
+    // {
+      certificates = lib.mapAttrsToList (
+        name: c:
+        {
+          inherit name;
+          inherit (c)
+            issuer
+            reload
+            group
+            ;
+        }
+        # Passed whenever set, so `hanko check` reports a key that does not match the issuer.
+        // lib.optionalAttrs (c.hosts != [ ]) { inherit (c) hosts; }
+        // lib.optionalAttrs (c.spiffeId != null) { spiffe_id = c.spiffeId; }
+      ) cfg.certificates;
     };
-    dns = {
-      nameservers = cfg.dns.nameservers;
-      tsig_key_file = cfg.dns.tsigKeyFile;
-      propagation_timeout = cfg.dns.propagationTimeout;
-    };
-    certificates = lib.mapAttrsToList (name: c: {
-      inherit name;
-      inherit (c)
-        issuer
-        hosts
-        reload
-        group
-        ;
-    }) cfg.certificates;
-  };
 
   # `hanko check` at build time: an invalid file never becomes a system (ADR 0002).
   configFile =
@@ -134,19 +147,38 @@ in
       };
     };
 
+    internal.ca = mkOption {
+      type = types.str;
+      example = "[fd12:3456:789a::1]:4900";
+      description = "hanko-ca's overlay address and port, for `internal` certificates (ADR 0004).";
+    };
+
     certificates = mkOption {
       type = types.attrsOf (
         types.submodule {
           options = {
             issuer = mkOption {
-              type = types.enum [ "acme" ];
+              type = types.enum [
+                "acme"
+                "internal"
+              ];
               default = "acme";
-              description = "Issuer; `internal` is v1.";
+              description = ''
+                `acme`: a public certificate, `fullchain.pem` and `key.pem` (ADR 0003). `internal`: an
+                X.509-SVID from hanko-ca, `svid.pem`, `key.pem` and `bundle.pem` (ADR 0004).
+              '';
             };
             hosts = mkOption {
-              type = types.nonEmptyListOf types.str;
+              type = types.listOf types.str;
+              default = [ ];
               example = [ "*.uchi.example.org" ];
-              description = "Names the certificate covers.";
+              description = "Names an `acme` certificate covers.";
+            };
+            spiffeId = mkOption {
+              type = types.nullOr types.str;
+              default = null;
+              example = "spiffe://uchi.example.org/vm/api";
+              description = "The SPIFFE ID of an `internal` certificate.";
             };
             reload = mkOption {
               type = types.listOf types.str;
@@ -158,8 +190,8 @@ in
               type = types.str;
               example = "genkan";
               description = ''
-                Group of the certificate's directory (mode 2750, setgid): who may read
-                `${state}/<name>/fullchain.pem` and `key.pem`. Included in the file so hanko verifies the directory group.
+                Group of the certificate's directory (mode 2750, setgid): who may read its files
+                under `${state}/<name>/`; for an `internal` certificate, the service's own group (ADR 0005). Included in the file so hanko verifies the directory group.
               '';
             };
           };

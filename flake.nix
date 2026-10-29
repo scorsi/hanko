@@ -137,6 +137,12 @@
               && !(ca ? StateDirectory)
               && lib.hasSuffix "/bin/hanko-ca serve /etc/hanko/ca.toml" ca.ExecStart;
             assert lib.all (c: c.group != "") evaluated.services.hanko.settings.certificates;
+            # The internal issuer's table and keys reach the file (ADR 0002, ADR 0004).
+            assert
+              evaluated.services.hanko.settings.internal.ca == "[fd12:3456:789a::1]:4900"
+              && lib.any (
+                c: c.issuer == "internal" && c.spiffe_id == "spiffe://uchi.example.org/vm/api" && !(c ? hosts)
+              ) evaluated.services.hanko.settings.certificates;
             pkgs.runCommand "hanko-module-eval" { } ''
               echo ${
                 lib.escapeShellArg (

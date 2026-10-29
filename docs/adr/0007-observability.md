@@ -62,3 +62,15 @@ The deployment pins hanko's ACME account in its CAA records (RFC 8657 `accountur
 | `sign-refused` (ID not allowed for the address, a CSR refused, or the CA certificate expired; `spiffe_id` cut at 256 bytes) | warn | `peer`, `spiffe_id`, `err` |
 | `bundle-refused` (`Bundle()` from an address not in `hosts`) | warn | `peer`, `err` |
 | `grpc-error` (an error line of grpc-go) | error | `err` |
+
+## Amendment 2026-10-29: the internal issuer
+
+The `internal` issuer (ADR 0004) writes the events above with `svid.pem` as the certificate;
+`certificate-renewing` carries `spiffe_id` instead of `hosts`. One event is added:
+
+| Event | Level | Fields |
+|---|---|---|
+| `bundle-written` (the trust bundle changed while the SVID was not due; its units are then reloaded as for a certificate) | info | `certificate` |
+
+A run that cannot reach `hanko-ca` fails the certificate (`certificate-failed`) even when its SVID
+is still valid: the bundle is refreshed on every run, and a stale one must reach `OnFailure=`.

@@ -23,6 +23,7 @@ import (
 	"github.com/scorsi/hanko/internal/issuer"
 	"github.com/scorsi/hanko/internal/logging"
 	"github.com/scorsi/hanko/internal/state"
+	"github.com/scorsi/hanko/internal/svid"
 )
 
 // Bounds one certificate's order, propagation wait and validation included.
@@ -32,8 +33,16 @@ type Issuer interface {
 	Issue(ctx context.Context, root *os.Root, hosts []string) (chain, key []byte, err error)
 }
 
+// Internal is hanko-ca seen from the oneshot (ADR 0004); *svid.Client in production. Both
+// return PEM; the bundle holds the signing CA first.
+type Internal interface {
+	Sign(ctx context.Context, spiffeID string) (svid, key, bundle []byte, err error)
+	Bundle(ctx context.Context) ([]byte, error)
+}
+
 type Runner struct {
 	Issuer   Issuer
+	Internal Internal
 	StateDir string
 	Reload   func(ctx context.Context, unit string) error
 	Log      *slog.Logger
@@ -117,7 +126,8 @@ func (r *Runner) one(ctx context.Context, root *os.Root, c config.Certificate) (
 		return false, err
 	}
 	defer dir.Close()
-	chain, err := state.ReadOptional(dir, "fullchain.pem", 0o640, gid)
+	internal := c.Issuer == "internal"
+	chain, err := state.ReadOptional(dir, certFile(c), 0o640, gid)
 	if err != nil {
 		return false, err
 	}
@@ -129,39 +139,70 @@ func (r *Runner) one(ctx context.Context, root *os.Root, c config.Certificate) (
 	if err != nil {
 		return false, err
 	}
+	due := func(chain []byte) string { return issuer.Due(chain, c.Hosts, time.Now()) }
+	// The internal issuer's bundle is refreshed on every run (ADR 0004): a CA added for a
+	// rotation reaches every consumer within one timer period (ADR 0012).
+	var bundle, newBundle []byte
+	if internal {
+		if bundle, err = state.ReadOptional(dir, "bundle.pem", 0o640, gid); err != nil {
+			return false, err
+		}
+		if newBundle, err = r.Internal.Bundle(ctx); err != nil {
+			return false, err
+		}
+		due = func(chain []byte) string { return svid.Due(chain, newBundle, c.SpiffeID, time.Now()) }
+	}
 	publish := func(newChain, newKey []byte) error {
-		if err := state.WriteFiles(dir, 0o640, state.File{Name: "fullchain.pem", Data: newChain}, state.File{Name: "key.pem", Data: newKey}); err != nil {
+		var files []state.File
+		if internal {
+			files = append(files, state.File{Name: "bundle.pem", Data: newBundle})
+		}
+		// The key last (ADR 0005).
+		files = append(files, state.File{Name: certFile(c), Data: newChain}, state.File{Name: "key.pem", Data: newKey})
+		if err := state.WriteFiles(dir, 0o640, files...); err != nil {
 			return err
 		}
 		chain, key = newChain, newKey
+		if internal {
+			bundle = newBundle
+		}
 		r.Log.Info("", "event", "certificate-written", "certificate", c.Name, "not_after", notAfter(chain))
 		return nil
 	}
 	renewed := false
 	// A pair an earlier run issued but did not finish publishing is installed without a new
 	// order: two renames are not atomic together (review H3, ADR 0009).
-	if savedChain, savedKey, ok := issuedPair(pending); ok && issuer.Due(savedChain, c.Hosts, time.Now()) == "" &&
+	if savedChain, savedKey, ok := issuedPair(pending); ok && due(savedChain) == "" &&
 		!(bytes.Equal(savedChain, chain) && bytes.Equal(savedKey, key)) {
 		if err := publish(savedChain, savedKey); err != nil {
 			return false, err
 		}
 		renewed = true
 	}
-	reason := issuer.Due(chain, c.Hosts, time.Now())
+	reason := due(chain)
 	if _, err := tls.X509KeyPair(chain, key); reason == "" && err != nil {
 		reason = "key absent or not matching the certificate"
 	}
 	if reason == "" {
 		r.Log.Info("", "event", "certificate-valid", "certificate", c.Name, "not_after", notAfter(chain))
 	} else {
-		r.Log.Info("", "event", "certificate-renewing", "certificate", c.Name, "reason", reason, "hosts", c.Hosts)
+		names := []any{"hosts", c.Hosts}
+		if internal {
+			names = []any{"spiffe_id", c.SpiffeID}
+		}
+		r.Log.Info("", append([]any{"event", "certificate-renewing", "certificate", c.Name, "reason", reason}, names...)...)
 		// Persist intent before the order: also proves the directory is writable before spending it.
 		if err := state.WriteFiles(dir, 0o600, state.File{Name: ".reload-pending", Data: []byte("pending\n")}); err != nil {
 			return false, err
 		}
 		pending = []byte("pending")
 		orderCtx, cancel := context.WithTimeout(ctx, orderTimeout)
-		newChain, newKey, err := r.Issuer.Issue(orderCtx, root, c.Hosts)
+		var newChain, newKey []byte
+		if internal {
+			newChain, newKey, newBundle, err = r.Internal.Sign(orderCtx, c.SpiffeID)
+		} else {
+			newChain, newKey, err = r.Issuer.Issue(orderCtx, root, c.Hosts)
+		}
 		cancel()
 		if err != nil {
 			return false, err
@@ -175,10 +216,31 @@ func (r *Runner) one(ctx context.Context, root *os.Root, c config.Certificate) (
 		}
 		renewed = true
 	}
+	if internal && !bytes.Equal(bundle, newBundle) {
+		// A new bundle alone is delivered like a certificate: intent first, then reloads.
+		if pending == nil {
+			if err := state.WriteFiles(dir, 0o600, state.File{Name: ".reload-pending", Data: []byte("pending\n")}); err != nil {
+				return false, err
+			}
+			pending = []byte("pending")
+		}
+		if err := state.WriteFiles(dir, 0o640, state.File{Name: "bundle.pem", Data: newBundle}); err != nil {
+			return false, err
+		}
+		r.Log.Info("", "event", "bundle-written", "certificate", c.Name)
+	}
 	if pending != nil {
 		return renewed, r.reload(ctx, dir, c)
 	}
 	return renewed, nil
+}
+
+// certFile is the certificate's file name: fullchain.pem (ACME) or svid.pem (internal, ADR 0004).
+func certFile(c config.Certificate) string {
+	if c.Issuer == "internal" {
+		return "svid.pem"
+	}
+	return "fullchain.pem"
 }
 
 // issuedPair splits a .reload-pending marker holding an issued chain followed by its key.
