@@ -38,7 +38,7 @@ Since ADR-0014 (2026-10-29) the per-host oneshot is `hanko-node` and `hanko` is 
 
 ## M3 — Operations (v0.3)
 
-- ~~`hanko status`: every certificate with issuer, names, expiry and last run result, read from the files; usable by the deployment's monitoring~~: done (ADR-0011, proposed); the M1 `nixosTest` breaks the TSIG key, the run fails and `hanko status` shows both certificates still valid.
+- ~~`hanko status`: every certificate with issuer, names, expiry and last run result, read from the files; usable by the deployment's monitoring~~: done (ADR-0011); the M1 `nixosTest` breaks the TSIG key, the run fails and `hanko status` shows both certificates still valid.
 - ~~Structured logs with one summary line per run~~: done ahead of M3 (ADR-0007, schema v1 lines, `run-completed`).
 - Failure notification wired through `OnFailure=` in the deployment.
 - Done when: a deliberately broken TSIG key produces a non-zero exit, a notification, and `hanko status` showing the certificate still valid.
@@ -49,9 +49,10 @@ Opened by the owner on 2026-10-29: two consumers now need service identity, hiky
 
 - ~~`hanko-ca`: daemon holding the CA key, gRPC `Sign` and `Bundle` under `proto/hanko/ca/v1/` with buf, overlay-address to allowed-IDs mapping, static user and hardening (ADR-0004, ADR-0005). NixOS module `ca`~~: done; unit and loopback gRPC tests, `module-eval` covers the `ca` module.
 - ~~`internal` issuer in `hanko`: CSR with the SPIFFE ID as URI SAN, `svid.pem`, `key.pem`, `bundle.pem`, 24 h lifetime renewed at half~~: done; renewal at half of the SVID's real lifetime (capped at the CA's end), bundle refreshed on every run, `hanko status` shows SVIDs and warns 30 days before the signing CA expires (ADR 0011 amendment); unit tests against an in-process `hanko-ca`. Since ADR 0013 hanko reloads no unit for an SVID: its consumers watch their files and reload in-process, and `reload` on an `internal` certificate is refused by `hanko check`.
-- `nixosTest`: `hanko-ca` on one VM, `hanko` on two others, a service on each authenticating the other by SPIFFE ID over mTLS; a request for an ID not allowed for the caller's address is refused; the bundle is refreshed on every run. Written as `checks.<linux>.internal` (nix/test-internal.nix), with step (a) of the CA rotation (ADR 0012) and a timer rotation that the services pick up from their files, with neither a reload nor a restart (ADR 0013); struck once it has passed.
+- ~~`nixosTest`: `hanko-ca` on one VM, `hanko` on two others, a service on each authenticating the other by SPIFFE ID over mTLS; a request for an ID not allowed for the caller's address is refused; the bundle is refreshed on every run. Written as `checks.<linux>.internal` (nix/test-internal.nix), with step (a) of the CA rotation (ADR 0012) and a timer rotation that the services pick up from their files, with neither a reload nor a restart (ADR 0013)~~: passed 2026-10-29 on x86_64-linux.
 - Deployment side: `tcp/4900` allowed from every hanko host in kekkai's per-peer rules; the node carrying `hanko-ca` chosen and its risk recorded privately.
 - Done when: two services on two hosts authenticate each other by SPIFFE ID, and a rotation happens through the timer without a reload or a restart of either.
+- **Status 2026-10-29: passed** (`internal` and `acme` green on x86_64-linux, 5e45ab3); deployment not done yet.
 
 ## Not planned
 
